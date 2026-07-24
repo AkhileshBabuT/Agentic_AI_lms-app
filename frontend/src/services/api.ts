@@ -72,6 +72,13 @@ export const rootAPI = {
 
   downloadFile: (type: 'material' | 'submission' | 'assignment', fileId: number) =>
     apiClient.get(`/root/files/download/${type}/${fileId}`),
+
+  // AI source-of-truth mode
+  getSourceOfTruth: () =>
+    apiClient.get('/root/settings/source-of-truth'),
+
+  setSourceOfTruth: (mode: 'strict' | 'external') =>
+    apiClient.put('/root/settings/source-of-truth', { mode }),
 };
 
 // Usage API (root admin only)

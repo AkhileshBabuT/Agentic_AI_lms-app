@@ -74,6 +74,7 @@ const RootDashboard: React.FC = () => {
   const [usageLogs, setUsageLogs] = useState<any[]>([]);
   const [usageFilter, setUsageFilter] = useState<string>('');
   const [usageView, setUsageView] = useState<'summary' | 'logs'>('summary');
+  const [sourceMode, setSourceMode] = useState<'strict' | 'external' | null>(null);
 
   // New course form
   const [showAddCourse, setShowAddCourse] = useState(false);
@@ -93,6 +94,25 @@ const RootDashboard: React.FC = () => {
     if (activeTab === 'files') loadFiles();
     if (activeTab === 'usage') loadUsage();
   }, [activeTab]);
+
+  useEffect(() => {
+    rootAPI.getSourceOfTruth()
+      .then(res => setSourceMode(res.data.mode))
+      .catch(() => setSourceMode('strict')); // display fail-closed default
+  }, []);
+
+  const toggleSourceMode = async () => {
+    if (!sourceMode) return;
+    const next = sourceMode === 'strict' ? 'external' : 'strict';
+    const prev = sourceMode;
+    setSourceMode(next);
+    try {
+      await rootAPI.setSourceOfTruth(next);
+    } catch {
+      setSourceMode(prev);
+      alert('Failed to update setting');
+    }
+  };
 
   const loadStats = async () => {
     try {
@@ -417,6 +437,19 @@ const RootDashboard: React.FC = () => {
                 <h3>{stats.pendingProfessors}</h3>
                 <p>Pending Approvals</p>
               </div>
+            </div>
+
+            <div className="settings-card">
+              <h3>AI Source of Truth</h3>
+              <p>
+                <strong>Strict:</strong> answers and fact-checks use uploaded course materials only.{' '}
+                <strong>External:</strong> web search and general model knowledge are allowed as labeled secondary sources.
+              </p>
+              <button onClick={toggleSourceMode} disabled={sourceMode === null}>
+                {sourceMode === null ? 'Loading…'
+                  : sourceMode === 'strict' ? 'Strict — course materials only (click to allow external)'
+                  : 'External — web + model knowledge allowed (click to restrict)'}
+              </button>
             </div>
           </div>
         )}
