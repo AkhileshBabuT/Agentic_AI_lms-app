@@ -4,7 +4,8 @@ import { OfficeParser } from 'officeparser';
 import * as XLSX from 'xlsx';
 import * as CFB from 'cfb';
 import { Groq } from 'groq-sdk';
-import { DOCUMENT_PROCESSING } from '../config/constants';
+import { DOCUMENT_PROCESSING, OCR_CONFIG } from '../config/constants';
+import { ocrDocument } from './ocrClient';
 
 /**
  * Interface for processed document chunks
@@ -29,7 +30,9 @@ export interface ProcessedDocument {
   metadata: {
     page_count?: number;
     word_count?: number;
-    extraction_method: 'pdf-parse' | 'mammoth' | 'text' | 'officeparser-pptx' | 'xlsx' | 'gemini-ocr' | 'unsupported';
+    extraction_method: 'pdf-parse' | 'mammoth' | 'text' | 'officeparser-pptx' | 'xlsx'
+      | 'gemini-ocr' | 'unlimited-ocr' | 'groq-vision' | 'unsupported';
+    extraction_degraded?: boolean;
     extraction_date: string;
     error?: string;
   };
@@ -39,87 +42,63 @@ export interface ProcessedDocument {
  * Extract text from a PDF file
  */
 async function extractFromPDF(fileBuffer: Buffer): Promise<ProcessedDocument> {
+  // Pass 1: text layer, collected per page so chunks get real page numbers.
+  let pageTexts: string[] = [];
+  let textLayerError: string | undefined;
   try {
-    const data = await pdfParse(fileBuffer);
-
-    const content_text = data.text;
-    const page_count = data.numpages;
-    const word_count = content_text.split(/\s+/).filter((w: string) => w.length > 0).length;
-
-    // Create chunks by page if possible
-    const chunks: DocumentChunk[] = [];
-
-    // Try to chunk by pages (pdf-parse provides full text, we'll split intelligently)
-    // For simplicity, we'll use a fixed-size chunking approach with page markers
-    const lines = content_text.split('\n');
-    let currentChunk = '';
-    let chunkIndex = 0;
-    let currentPage = 1;
-    let charPosition = 0;
-
-    for (const line of lines) {
-      // Check if we should start a new chunk (target ~500 words per chunk for better granularity)
-      const currentWordCount = currentChunk.split(/\s+/).filter((w: string) => w.length > 0).length;
-
-      if (currentWordCount >= 300 && line.trim().length > 0) {
-        // Save current chunk
-        if (currentChunk.trim().length > 0) {
-          chunks.push({
-            chunk_id: `chunk_${chunkIndex}`,
-            text: currentChunk.trim(),
-            metadata: {
-              page_number: currentPage,
-              start_char: charPosition - currentChunk.length,
-              end_char: charPosition,
-              chunk_index: chunkIndex
-            }
-          });
-          chunkIndex++;
-        }
-        currentChunk = line + '\n';
-      } else {
-        currentChunk += line + '\n';
-      }
-
-      charPosition += line.length + 1;
-    }
-
-    // Add the last chunk
-    if (currentChunk.trim().length > 0) {
-      chunks.push({
-        chunk_id: `chunk_${chunkIndex}`,
-        text: currentChunk.trim(),
-        metadata: {
-          page_number: currentPage,
-          start_char: charPosition - currentChunk.length,
-          end_char: charPosition,
-          chunk_index: chunkIndex
-        }
-      });
-    }
-
-    return {
-      content_text,
-      content_chunks: chunks,
-      metadata: {
-        page_count,
-        word_count,
-        extraction_method: 'pdf-parse',
-        extraction_date: new Date().toISOString()
-      }
-    };
+    const collected: string[] = [];
+    await pdfParse(fileBuffer, {
+      pagerender: async (pageData: any) => {
+        const tc = await pageData.getTextContent();
+        const text = tc.items.map((it: any) => it.str).join(' ');
+        collected.push(text);
+        return text;
+      },
+    });
+    pageTexts = collected;
   } catch (error) {
-    console.error('Error extracting text from PDF:', error);
-    return {
-      content_text: '',
-      content_chunks: [],
-      metadata: {
-        extraction_method: 'pdf-parse',
-        extraction_date: new Date().toISOString(),
-        error: `PDF extraction failed: ${error instanceof Error ? error.message : 'Unknown error'}`
-      }
-    };
+    textLayerError = error instanceof Error ? error.message : 'Unknown error';
   }
+
+  const scanned = needsOcr(pageTexts);
+
+  // Pass 2: scanned or unreadable PDFs go to the OCR sidecar.
+  if (scanned && OCR_CONFIG.ENABLED) {
+    try {
+      const ocrPages = await ocrDocument(fileBuffer, 'application/pdf');
+      const pages = ocrPages.map(p => ({ page_number: p.page_number, text: p.markdown }));
+      const content_text = pages.map(p => p.text).join('\n\n');
+      return {
+        content_text,
+        content_chunks: chunkPages(pages),
+        metadata: {
+          page_count: pages.length,
+          word_count: content_text.split(/\s+/).filter(w => w.length > 0).length,
+          extraction_method: 'unlimited-ocr',
+          extraction_date: new Date().toISOString(),
+        },
+      };
+    } catch (ocrError) {
+      console.error('OCR sidecar failed, falling back to text layer:', ocrError);
+      // fall through to degraded text-layer result below
+    }
+  }
+
+  const content_text = pageTexts.join('\n\n');
+  const pages = pageTexts.map((text, i) => ({ page_number: i + 1, text }));
+  return {
+    content_text,
+    content_chunks: chunkPages(pages),
+    metadata: {
+      page_count: pageTexts.length,
+      word_count: content_text.split(/\s+/).filter(w => w.length > 0).length,
+      extraction_method: 'pdf-parse',
+      extraction_date: new Date().toISOString(),
+      // Scanned doc without a working OCR path = we KNOW this extraction is bad.
+      ...(scanned ? { extraction_degraded: true } : {}),
+      ...(textLayerError ? { error: `PDF extraction failed: ${textLayerError}` } : {}),
+    },
+  };
 }
 
 /**
@@ -514,6 +493,33 @@ If there is no readable text in the image, respond with exactly: "NO_TEXT_FOUND"
       }
     };
   }
+}
+
+/** A PDF whose text layer averages fewer words/page than the threshold is treated as scanned. */
+export function needsOcr(pageTexts: string[]): boolean {
+  if (pageTexts.length === 0) return true;
+  const totalWords = pageTexts
+    .join(' ')
+    .split(/\s+/)
+    .filter(w => w.length > 0).length;
+  return totalWords / pageTexts.length < OCR_CONFIG.MIN_WORDS_PER_PAGE;
+}
+
+/** Chunk page-by-page so every chunk carries its real page number. */
+export function chunkPages(pages: Array<{ page_number: number; text: string }>): DocumentChunk[] {
+  const chunks: DocumentChunk[] = [];
+  for (const page of pages) {
+    if (page.text.trim().length === 0) continue;
+    for (const chunk of chunkTextSemantic(page.text)) {
+      const index = chunks.length;
+      chunks.push({
+        chunk_id: `chunk_${index}`,
+        text: chunk.text,
+        metadata: { ...chunk.metadata, page_number: page.page_number, chunk_index: index },
+      });
+    }
+  }
+  return chunks;
 }
 
 /**
