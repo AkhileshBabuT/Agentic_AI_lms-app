@@ -37,7 +37,7 @@ def _rasterize(data: bytes, mime_type: str) -> list[bytes]:
     return [data]  # already an image
 
 
-def _ocr_page(png: bytes) -> str:
+def _ocr_page(image: bytes, media_type: str) -> str:
     result = client.chat.completions.create(
         model=MODEL_ID,
         messages=[{
@@ -45,7 +45,7 @@ def _ocr_page(png: bytes) -> str:
             "content": [
                 {"type": "text", "text": PAGE_PROMPT},
                 {"type": "image_url", "image_url": {
-                    "url": f"data:image/png;base64,{base64.b64encode(png).decode()}"}},
+                    "url": f"data:{media_type};base64,{base64.b64encode(image).decode()}"}},
             ],
         }],
         temperature=0.0,
@@ -69,5 +69,6 @@ def ocr(req: OcrRequest):
     if not pngs:
         raise HTTPException(status_code=400, detail="Document has no pages")
     # ponytail: sequential per-page calls; batch pages per request if throughput matters
-    pages = [{"page_number": i + 1, "markdown": _ocr_page(png)} for i, png in enumerate(pngs)]
+    media_type = "image/png" if req.mime_type == "application/pdf" else req.mime_type
+    pages = [{"page_number": i + 1, "markdown": _ocr_page(png, media_type)} for i, png in enumerate(pngs)]
     return {"pages": pages, "model": MODEL_ID}

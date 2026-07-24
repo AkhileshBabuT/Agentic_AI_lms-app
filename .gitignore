@@ -56,3 +56,7 @@ nul
 # Database backups
 *.dump
 *.sql.backup
+
+# Python
+__pycache__/
+*.pyc
