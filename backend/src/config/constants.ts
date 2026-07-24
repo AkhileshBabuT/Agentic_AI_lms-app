@@ -108,6 +108,19 @@ export const EMBEDDING_CONFIG = {
 } as const;
 
 // =====================================================
+// RERANKER CONFIGURATION (stage-2 retrieval precision)
+// =====================================================
+export const RERANKER_CONFIG = {
+  ENABLED: process.env.RERANKER_ENABLED !== 'false',
+
+  /** Local transformers.js cross-encoder (ponytail: base model; set RERANKER_MODEL_ID to a v2-m3 ONNX build when available) */
+  MODEL_ID: process.env.RERANKER_MODEL_ID || 'Xenova/bge-reranker-base',
+
+  /** Truncate each document to this many chars before scoring (cross-encoders are O(pair)) */
+  MAX_DOC_CHARS: 2000,
+} as const;
+
+// =====================================================
 // AI SERVICE CONFIGURATION
 // =====================================================
 export const AI_SERVICE = {

@@ -4,7 +4,8 @@ import { getAIService } from '../ai/AIServiceFactory';
 import { pool } from '../../config/database';
 import { WebSearchService } from '../search/WebSearchService';
 import { searchCourseMaterials as vectorSearchCourseMaterials, getCourseMaterialStats } from '../vectorSearch';
-import { AGENT_CONFIG, VECTOR_SEARCH, EMOTIONAL_FILTER_CONFIG } from '../../config/constants';
+import { AGENT_CONFIG, VECTOR_SEARCH, EMOTIONAL_FILTER_CONFIG, RERANKER_CONFIG } from '../../config/constants';
+import { rerank } from '../rerankerService';
 import { getEmotionalFilterService, EmotionalFilterResult } from '../emotional/EmotionalFilterService';
 import { downloadFile } from '../../config/storage';
 import { extractTextFromFile } from '../documentProcessor';
@@ -216,6 +217,16 @@ Would you like me to help you understand what skills and certifications can help
         AGENT_CONFIG.CHATBOT_SEARCH_LIMIT
       );
 
+      // Stage 2: cross-encoder precision over the vector recall set.
+      const rankedMaterials = RERANKER_CONFIG.ENABLED
+        ? await rerank(
+            message.content,
+            relevantMaterials,
+            m => m.content_text || '',
+            AGENT_CONFIG.CHATBOT_PROMPT_MAX_CHUNKS
+          )
+        : relevantMaterials;
+
       // Check if we should search the web (if course materials are insufficient)
       const webSearchService = new WebSearchService();
       const shouldSearchWeb = WebSearchService.shouldSearchWeb(relevantMaterials, message.content);
@@ -237,7 +248,7 @@ Would you like me to help you understand what skills and certifications can help
       // Build enhanced context with course materials AND web search results
       const enhancedContext: AIContext = {
         ...context,
-        relevantMaterials,
+        relevantMaterials: rankedMaterials,
         webSearchResults: webSearchResults.length > 0 ? webSearchResults : undefined
       };
 
@@ -246,7 +257,7 @@ Would you like me to help you understand what skills and certifications can help
       // retrieved chunks were never sent to the model, so answers were ungrounded.
       const groundedQuestion = this.buildGroundedQuestion(
         message.content,
-        relevantMaterials,
+        rankedMaterials,
         webSearchResults
       );
 
@@ -303,7 +314,7 @@ Would you like me to help you understand what skills and certifications can help
       }
 
       // Extract sources from the response (including web sources)
-      const sources = this.extractSources(finalContent, relevantMaterials, webSearchResults);
+      const sources = this.extractSources(finalContent, rankedMaterials, webSearchResults);
 
       // Store sources in database
       if (message.sessionId && message.messageId) {
