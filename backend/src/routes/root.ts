@@ -2,6 +2,7 @@ import express from 'express';
 import { pool } from '../config/database';
 import { authenticate, authorize } from '../middleware/auth';
 import { generateSignedUrl } from '../config/storage';
+import { getSourceOfTruthMode, setSourceOfTruthMode } from '../services/settingsService';
 
 const router = express.Router();
 
@@ -603,6 +604,20 @@ router.delete('/professors/:professorId/courses/:courseId', async (req, res) => 
   } finally {
     client.release();
   }
+});
+
+// ---- Global settings: source-of-truth mode ----
+router.get('/settings/source-of-truth', async (_req, res) => {
+  res.json({ mode: await getSourceOfTruthMode() });
+});
+
+router.put('/settings/source-of-truth', async (req, res) => {
+  const { mode } = req.body;
+  if (mode !== 'strict' && mode !== 'external') {
+    return res.status(400).json({ error: "mode must be 'strict' or 'external'" });
+  }
+  await setSourceOfTruthMode(mode, req.user!.userId);
+  res.json({ mode });
 });
 
 // ========== FILE MANAGEMENT ENDPOINTS ==========
