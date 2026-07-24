@@ -427,9 +427,31 @@ async function extractFromExcel(fileBuffer: Buffer): Promise<ProcessedDocument> 
 }
 
 /**
- * Extract text from an image using Google Gemini multimodal AI (OCR)
+ * Extract text from an image: OCR sidecar first, Groq vision model as fallback.
  */
 async function extractFromImage(fileBuffer: Buffer, mimeType: string): Promise<ProcessedDocument> {
+  // Preferred path: local OCR sidecar.
+  if (OCR_CONFIG.ENABLED) {
+    try {
+      const ocrPages = await ocrDocument(fileBuffer, mimeType);
+      const content_text = ocrPages.map(p => p.markdown).join('\n\n').trim();
+      if (content_text.length > 0) {
+        return {
+          content_text,
+          content_chunks: chunkPages(ocrPages.map(p => ({ page_number: p.page_number, text: p.markdown }))),
+          metadata: {
+            word_count: content_text.split(/\s+/).filter(w => w.length > 0).length,
+            extraction_method: 'unlimited-ocr',
+            extraction_date: new Date().toISOString(),
+          },
+        };
+      }
+    } catch (error) {
+      console.error('OCR sidecar failed for image, falling back to Groq vision:', error);
+    }
+  }
+
+  // Fallback: Groq vision model.
   try {
     const apiKey = process.env.GROQ_API_KEY || process.env.AI_API_KEY;
     if (!apiKey) {
@@ -440,7 +462,7 @@ async function extractFromImage(fileBuffer: Buffer, mimeType: string): Promise<P
     const groq = new Groq({ apiKey });
 
     const result = await groq.chat.completions.create({
-      model: 'llama-3.2-11b-vision-preview',
+      model: OCR_CONFIG.GROQ_VISION_FALLBACK_MODEL,
       messages: [
         {
           role: 'user',
@@ -459,49 +481,46 @@ If there is no readable text in the image, respond with exactly: "NO_TEXT_FOUND"
             },
             {
               type: 'image_url',
-              image_url: {
-                url: `data:${mimeType};base64,${base64Data}`
-              }
+              image_url: { url: `data:${mimeType};base64,${base64Data}` }
             }
           ]
         }
       ]
     });
 
-    let content_text = result.choices[0]?.message?.content?.trim() || '';
+    const content_text = result.choices[0]?.message?.content?.trim() || '';
 
     if (content_text === 'NO_TEXT_FOUND' || content_text.length === 0) {
       return {
         content_text: '',
         content_chunks: [],
         metadata: {
-          extraction_method: 'gemini-ocr',
+          extraction_method: 'groq-vision',
           extraction_date: new Date().toISOString(),
           error: 'Image contained no extractable text'
         }
       };
     }
 
-    const word_count = content_text.split(/\s+/).filter((w: string) => w.length > 0).length;
-    const chunks = chunkTextSemantic(content_text);
-
     return {
       content_text,
-      content_chunks: chunks,
+      content_chunks: chunkTextSemantic(content_text),
       metadata: {
-        word_count,
-        extraction_method: 'gemini-ocr',
-        extraction_date: new Date().toISOString()
+        word_count: content_text.split(/\s+/).filter(w => w.length > 0).length,
+        extraction_method: 'groq-vision',
+        extraction_date: new Date().toISOString(),
+        extraction_degraded: OCR_CONFIG.ENABLED ? true : undefined,
       }
     };
   } catch (error) {
-    console.error('Error extracting text from image via Gemini OCR:', error);
+    console.error('Error extracting text from image:', error);
     return {
       content_text: '',
       content_chunks: [],
       metadata: {
-        extraction_method: 'gemini-ocr',
+        extraction_method: 'groq-vision',
         extraction_date: new Date().toISOString(),
+        extraction_degraded: true,
         error: `Image OCR extraction failed: ${error instanceof Error ? error.message : 'Unknown error'}`
       }
     };

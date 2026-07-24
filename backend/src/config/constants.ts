@@ -52,6 +52,9 @@ export const OCR_CONFIG = {
 
   /** Whole-document OCR timeout (large scanned decks are slow) */
   TIMEOUT_MS: 300_000,
+
+  /** Groq vision model used for images when the sidecar is down (verify against console.groq.com/docs/models) */
+  GROQ_VISION_FALLBACK_MODEL: process.env.GROQ_VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct',
 } as const;
 
 // =====================================================
