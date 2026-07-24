@@ -1,0 +1,28 @@
+.score-explainer { position: relative; display: inline-block; }
+
+.score-explainer-btn {
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 1px solid #94a3b8; background: transparent; color: #94a3b8;
+  font-size: 11px; font-style: italic; font-weight: 700;
+  cursor: pointer; line-height: 1;
+}
+.score-explainer-btn:hover { border-color: #475569; color: #475569; }
+
+.score-explainer-popover {
+  position: absolute; z-index: 30; top: 24px; left: 0;
+  width: 300px; padding: 12px; border-radius: 8px;
+  background: #fff; border: 1px solid #e2e8f0;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  font-size: 12px; text-align: left;
+}
+.score-explainer-popover h4 { margin: 0 0 8px; font-size: 13px; }
+.score-explainer-row { margin-bottom: 8px; }
+.score-explainer-row p { margin: 2px 0 0; color: #475569; }
+
+.score-explainer-bands { display: flex; gap: 6px; margin: 8px 0; }
+.band { padding: 1px 6px; border-radius: 10px; font-size: 11px; }
+.band.good { background: #dcfce7; color: #166534; }
+.band.warn { background: #fef9c3; color: #854d0e; }
+.band.bad  { background: #fee2e2; color: #991b1b; }
+
+.score-explainer-flags { margin: 0; color: #64748b; }

@@ -15,6 +15,7 @@ import {
   getEmotionColor,
   getEmotionEmoji,
 } from '../types/agenticai';
+import ScoreExplainer from './ScoreExplainer';
 import './MessageMetadata.css';
 
 const MAX_POLL_ATTEMPTS = 5;
@@ -216,6 +217,19 @@ const MessageMetadata: React.FC<MessageMetadataProps> = ({ messageId, metadata }
             Fact Check: {factCheck.overall_accuracy_score}/100
           </button>
         ) : null}
+
+        <ScoreExplainer />
+
+        {metadata?.sourceOfTruthMode && (
+          <span
+            className="metadata-badge"
+            title={metadata.sourceOfTruthMode === 'strict'
+              ? 'Answered using course materials only'
+              : 'External sources (web / general knowledge) were allowed'}
+          >
+            {metadata.sourceOfTruthMode === 'strict' ? '📚 Course materials only' : '🌐 External allowed'}
+          </span>
+        )}
       </div>
 
       {/* Validation warnings — only when trust score is loaded and present */}
