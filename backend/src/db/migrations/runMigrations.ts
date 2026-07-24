@@ -48,6 +48,12 @@ export async function runMigrations(): Promise<void> {
     await client.query(validationScoreMigrationSQL);
     console.log('✓ Validation Score schema migration completed successfully');
 
+    // Migration 7: App settings (global source-of-truth mode + audit trail)
+    const appSettingsMigrationPath = path.join(__dirname, 'app-settings-schema.sql');
+    const appSettingsMigrationSQL = fs.readFileSync(appSettingsMigrationPath, 'utf8');
+    await client.query(appSettingsMigrationSQL);
+    console.log('✓ App Settings schema migration completed successfully');
+
   } catch (error) {
     console.error('Error running migrations:', error);
     throw error;
