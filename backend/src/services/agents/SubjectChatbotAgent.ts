@@ -11,6 +11,7 @@ import { downloadFile } from '../../config/storage';
 import { extractTextFromFile } from '../documentProcessor';
 import { generateEmbeddings } from '../embeddingService';
 import { embeddingToPostgresVector } from '../embeddingService';
+import { getSourceOfTruthMode } from '../settingsService';
 
 /**
  * Subject-Specific Chatbot Agent
@@ -229,7 +230,11 @@ Would you like me to help you understand what skills and certifications can help
 
       // Check if we should search the web (if course materials are insufficient)
       const webSearchService = new WebSearchService();
-      const shouldSearchWeb = WebSearchService.shouldSearchWeb(relevantMaterials, message.content);
+      const sourceOfTruthMode = await getSourceOfTruthMode();
+      // Strict mode: course materials are the only source — web search is never consulted.
+      const shouldSearchWeb =
+        sourceOfTruthMode === 'external' &&
+        WebSearchService.shouldSearchWeb(relevantMaterials, message.content);
 
       let webSearchResults: any[] = [];
       let webSearchContext = '';
@@ -349,6 +354,7 @@ Would you like me to help you understand what skills and certifications can help
           materialsSearched: relevantMaterials.length,
           webSearchUsed: shouldSearchWeb,
           webResultsFound: webSearchResults.length,
+          sourceOfTruthMode,
           emotionalFilter: emotionalFilterResult ? {
             applied: emotionalFilterResult.wasAdjusted,
             detectedEmotion: emotionalFilterResult.emotionalContext.currentState.primary,
