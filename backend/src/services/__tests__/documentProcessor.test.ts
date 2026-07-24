@@ -35,4 +35,11 @@ describe('chunkPages', () => {
     expect(chunks).toHaveLength(1);
     expect(chunks[0].metadata.page_number).toBe(2);
   });
+  it('splits a single oversized newline-free page into multiple chunks', () => {
+    // 900 words, no paragraph breaks — the exact shape a PDF page renders as.
+    const bigPage = Array.from({ length: 900 }, (_, i) => `w${i}`).join(' ');
+    const chunks = chunkPages([{ page_number: 1, text: bigPage }]);
+    expect(chunks.length).toBeGreaterThan(1); // was 1 before the oversized-paragraph fix
+    chunks.forEach(c => expect(c.metadata.page_number).toBe(1));
+  });
 });

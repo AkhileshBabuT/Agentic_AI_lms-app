@@ -49,8 +49,16 @@ async function extractFromPDF(fileBuffer: Buffer): Promise<ProcessedDocument> {
     const collected: string[] = [];
     await pdfParse(fileBuffer, {
       pagerender: async (pageData: any) => {
-        const tc = await pageData.getTextContent();
-        const text = tc.items.map((it: any) => it.str).join(' ');
+        let text = '';
+        try {
+          const tc = await pageData.getTextContent();
+          // Preserve line breaks (hasEOL) so chunking sees structure, not one blob.
+          text = tc.items.map((it: any) => it.str + (it.hasEOL ? '\n' : ' ')).join('').trim();
+        } catch {
+          // A single page's failure must NOT drop it from `collected` — that would
+          // misalign every later page number. Keep a placeholder to preserve order.
+          text = '';
+        }
         collected.push(text);
         return text;
       },
@@ -68,6 +76,11 @@ async function extractFromPDF(fileBuffer: Buffer): Promise<ProcessedDocument> {
       const ocrPages = await ocrDocument(fileBuffer, 'application/pdf');
       const pages = ocrPages.map(p => ({ page_number: p.page_number, text: p.markdown }));
       const content_text = pages.map(p => p.text).join('\n\n');
+      if (content_text.trim().length === 0) {
+        // Non-empty pages array but all blank markdown — treat as failure so we fall
+        // through to the degraded text-layer branch (which flags extraction_degraded).
+        throw new Error('OCR sidecar returned only blank pages');
+      }
       return {
         content_text,
         content_chunks: chunkPages(pages),
@@ -532,7 +545,21 @@ function chunkTextSemantic(text: string): DocumentChunk[] {
   const overlapWords = DOCUMENT_PROCESSING.CHUNK_OVERLAP_WORDS;
 
   // Split into paragraphs first (preserve natural document structure)
-  const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim().length > 0);
+  const rawParagraphs = text.split(/\n\s*\n/).filter(p => p.trim().length > 0);
+  // Break any single paragraph longer than the target into word-sized sub-blocks,
+  // so a newline-free page (e.g. a PDF page rendered as one blob) can't collapse
+  // into a single oversized chunk.
+  const paragraphs: string[] = [];
+  for (const p of rawParagraphs) {
+    const words = p.split(/\s+/).filter(w => w.length > 0);
+    if (words.length <= targetWords) {
+      paragraphs.push(p);
+    } else {
+      for (let i = 0; i < words.length; i += targetWords) {
+        paragraphs.push(words.slice(i, i + targetWords).join(' '));
+      }
+    }
+  }
 
   const chunks: DocumentChunk[] = [];
   let currentChunk = '';
