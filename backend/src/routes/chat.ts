@@ -14,6 +14,7 @@ import { EnhancedIntegrityVerificationAgent } from '../services/agents/EnhancedI
 import { AgentMessage } from '../services/agents/newAgentTypes';
 import { AIContext, AIMessage } from '../services/ai/types';
 import { getGroqFactCheckService } from '../services/factcheck/GroqFactCheckService';
+import { getSourceOfTruthMode } from '../services/settingsService';
 import { FACT_CHECK_CONFIG } from '../config/constants';
 import { logUsage } from '../utils/usageLogger';
 import fs from 'fs';
@@ -597,7 +598,8 @@ router.post(
               sanitizedContent,
               conversationHistory,
               { title: course.title, description: course.description },
-              sourceContent
+              sourceContent,
+              await getSourceOfTruthMode()
             );
           }
         } catch (err: any) {
