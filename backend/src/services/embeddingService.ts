@@ -2,7 +2,7 @@ import { pipeline, FeatureExtractionPipeline } from '@xenova/transformers';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
-import { SCORING } from '../config/constants';
+import { EMBEDDING_CONFIG } from '../config/constants';
 
 dotenv.config();
 
@@ -18,8 +18,8 @@ let embeddingPipeline: FeatureExtractionPipeline | null = null;
 
 async function getPipeline(): Promise<FeatureExtractionPipeline> {
   if (!embeddingPipeline) {
-    logToFile("Initializing Xenova local embedding model: Xenova/bge-base-en-v1.5");
-    embeddingPipeline = await pipeline('feature-extraction', 'Xenova/bge-base-en-v1.5', {
+    logToFile(`Initializing Xenova local embedding model: ${EMBEDDING_CONFIG.MODEL_ID}`);
+    embeddingPipeline = await pipeline('feature-extraction', EMBEDDING_CONFIG.MODEL_ID, {
       quantized: true,
     });
   }
@@ -43,7 +43,15 @@ export async function generateEmbedding(text: string): Promise<number[]> {
       normalize: true
     });
 
-    return Array.from(result.data) as number[];
+    const embedding = Array.from(result.data) as number[];
+    if (embedding.length !== EMBEDDING_CONFIG.EMBEDDING_DIMENSION) {
+      throw new Error(
+        `Embedding dimension mismatch: model produced ${embedding.length}, ` +
+        `config expects ${EMBEDDING_CONFIG.EMBEDDING_DIMENSION}. ` +
+        `Check EMBEDDING_MODEL_ID/EMBEDDING_DIMENSION and reindex.`
+      );
+    }
+    return embedding;
   } catch (error) {
     console.error('Error generating embedding:', error);
     throw new Error(`Embedding generation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -166,7 +174,7 @@ export async function generateEmbeddingCached(
  * Uses the same cache, keyed on the prefixed text so it never collides with doc embeddings.
  */
 export async function embedQuery(text: string, useCache: boolean = true): Promise<number[]> {
-  const prefixed = SCORING.BGE_QUERY_PREFIX + text;
+  const prefixed = EMBEDDING_CONFIG.QUERY_PREFIX + text;
   return generateEmbeddingCached(prefixed, useCache);
 }
 

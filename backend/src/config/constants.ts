@@ -87,6 +87,16 @@ export const AGENT_CONFIG = {
 // EMBEDDING SERVICE CONFIGURATION
 // =====================================================
 export const EMBEDDING_CONFIG = {
+  /** Local transformers.js embedding model (a change requires a full reindex — see reindexEmbeddings.ts) */
+  MODEL_ID: process.env.EMBEDDING_MODEL_ID || 'Xenova/bge-base-en-v1.5',
+
+  /** Asymmetric query prefix. bge-base-en-v1.5 requires it; bge-m3 uses '' (set via env on migration). */
+  QUERY_PREFIX: process.env.EMBEDDING_QUERY_PREFIX
+    ?? 'Represent this sentence for searching relevant passages: ',
+
+  /** Must match both the model output and the pgvector column dimension */
+  EMBEDDING_DIMENSION: parseInt(process.env.EMBEDDING_DIMENSION || '768', 10),
+
   /** Batch size for embedding generation */
   BATCH_SIZE: 5,
 
@@ -95,9 +105,6 @@ export const EMBEDDING_CONFIG = {
 
   /** Maximum cache size for in-memory embedding cache */
   CACHE_MAX_SIZE: 1000,
-
-  /** Embedding dimension for text-embedding-004 model */
-  EMBEDDING_DIMENSION: 768,
 } as const;
 
 // =====================================================
@@ -323,9 +330,6 @@ export const COVE_CONFIG = {
 // SCORING CONFIGURATION (Validation + Trust)
 // =====================================================
 export const SCORING = {
-  /** BGE retrieval query prefix — REQUIRED for bge-base-en-v1.5 queries. Documents stay raw. */
-  BGE_QUERY_PREFIX: 'Represent this sentence for searching relevant passages: ',
-
   /** Two-model Groq jury for the trust score */
   TRUST_MODEL_A: process.env.TRUST_MODEL_A || 'qwen/qwen3-32b',
   TRUST_MODEL_B: process.env.TRUST_MODEL_B || 'llama-3.3-70b-versatile',
