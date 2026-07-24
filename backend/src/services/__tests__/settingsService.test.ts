@@ -26,6 +26,11 @@ describe('getSourceOfTruthMode', () => {
     expect(await getSourceOfTruthMode()).toBe('strict');
   });
 
+  it('fails CLOSED to strict when the stored value is invalid', async () => {
+    queryMock.mockResolvedValue({ rows: [{ source_of_truth_mode: 'garbage' }] });
+    expect(await getSourceOfTruthMode()).toBe('strict');
+  });
+
   it('caches reads', async () => {
     queryMock.mockResolvedValue({ rows: [{ source_of_truth_mode: 'strict' }] });
     await getSourceOfTruthMode();
