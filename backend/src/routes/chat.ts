@@ -464,7 +464,8 @@ router.post(
         [parsedSessionId, 'agent', agentResponse.content, JSON.stringify({
           confidence: agentResponse.confidence,
           sourcesCount: agentResponse.sources?.length || 0,
-          emotionalFilter: agentResponse.metadata?.emotionalFilter || null
+          emotionalFilter: agentResponse.metadata?.emotionalFilter || null,
+          sourceOfTruthMode: agentResponse.metadata?.sourceOfTruthMode || null
         })]
       );
 
@@ -897,7 +898,8 @@ router.post('/sessions/:sessionId/regenerate', async (req: Request, res: Respons
       [sessionId, 'agent', agentResponse.content, JSON.stringify({
         regenerated: true,
         confidence: agentResponse.confidence,
-        sourcesCount: agentResponse.sources?.length || 0
+        sourcesCount: agentResponse.sources?.length || 0,
+        sourceOfTruthMode: agentResponse.metadata?.sourceOfTruthMode || null
       })]
     );
 
