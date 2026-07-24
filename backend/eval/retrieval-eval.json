@@ -1,0 +1,15 @@
+{
+  "_instructions": "Fill with >=10 real course questions. Each case: question, course_id, and ONE of expect_material_id (the material that answers it) or expect_substring (text that must appear in a correct chunk). The harness refuses to run with fewer than 10 cases.",
+  "cases": [
+    {
+      "question": "EXAMPLE — What is the time complexity of binary search?",
+      "course_id": 1,
+      "expect_substring": "O(log n)"
+    },
+    {
+      "question": "EXAMPLE — Which chapter covers normalization?",
+      "course_id": 1,
+      "expect_material_id": 12
+    }
+  ]
+}
