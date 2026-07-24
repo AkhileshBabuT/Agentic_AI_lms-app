@@ -38,6 +38,23 @@ export const DOCUMENT_PROCESSING = {
 } as const;
 
 // =====================================================
+// OCR SIDECAR CONFIGURATION (Unlimited-OCR)
+// =====================================================
+export const OCR_CONFIG = {
+  /** OCR is used only when a sidecar URL is configured (and not force-disabled) */
+  ENABLED: !!process.env.OCR_SIDECAR_URL && process.env.OCR_ENABLED !== 'false',
+
+  /** Base URL of the FastAPI OCR sidecar */
+  SIDECAR_URL: process.env.OCR_SIDECAR_URL || 'http://localhost:8100',
+
+  /** PDFs averaging fewer words per page than this are treated as scanned -> OCR */
+  MIN_WORDS_PER_PAGE: 40,
+
+  /** Whole-document OCR timeout (large scanned decks are slow) */
+  TIMEOUT_MS: 300_000,
+} as const;
+
+// =====================================================
 // AGENT CONFIGURATION
 // =====================================================
 export const AGENT_CONFIG = {
