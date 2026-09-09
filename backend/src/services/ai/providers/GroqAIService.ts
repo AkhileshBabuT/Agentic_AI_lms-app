@@ -118,7 +118,9 @@ export class GroqAIService implements IAIService {
             model: this.model,
             temperature: this.config.temperature || 0.7,
             max_tokens: this.config.maxTokens || 1024,
-            response_format: options?.jsonMode ? { type: 'json_object' } : undefined
+            response_format: options?.jsonMode ? { type: 'json_object' } : undefined,
+            // ponytail: reasoning models (qwen3, gpt-oss) blow json_object mode by emitting <think> tokens; disable thinking. Omitted (undefined) for llama.
+            reasoning_effort: /qwen|gpt-oss/.test(this.model) ? 'none' : undefined
           });
         },
         {
