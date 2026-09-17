@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { chatAPI } from '../services/api';
 import { useToast } from '../components/Toast';
+import MessageMetadata from '../components/MessageMetadata';
 import './AgentContentViewer.css';
 
 interface ContentDetails {
@@ -191,11 +192,8 @@ const AgentContentViewer: React.FC = () => {
           </div>
         </div>
 
-        {content.content_metadata && Object.keys(content.content_metadata).length > 0 && (
-          <div className="content-metadata">
-            <h3>Additional Information</h3>
-            <pre>{JSON.stringify(content.content_metadata, null, 2)}</pre>
-          </div>
+        {Number.isSafeInteger(content.content_metadata?.originalMessageId) && (
+          <MessageMetadata messageId={content.content_metadata.originalMessageId} savedContentId={content.id} metadata={content.content_metadata} />
         )}
       </div>
     </div>

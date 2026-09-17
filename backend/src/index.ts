@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -10,9 +11,12 @@ import rootRoutes from './routes/root';
 import professorRoutes from './routes/professor';
 import studentRoutes from './routes/student';
 import chatRoutes from './routes/chat';
+import materialSourceRoutes from './routes/materialSources';
 import gradingAssistantRoutes from './routes/gradingAssistant';
 import usageRoutes from './routes/usage';
 import { connectDB } from './config/database';
+import { checkRagReadiness } from './services/rag/readiness';
+import { warmRagModels } from './services/rag/modelInference';
 
 dotenv.config();
 
@@ -55,6 +59,16 @@ app.use(morgan('combined', { stream: morganStream }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Diagnostic routes expose development data and must never be reachable in production.
+app.use((req, res, next) => {
+  if ((/^\/api\/(debug|test)[-/]/.test(req.path) ||
+       /^\/api\/(check-email|db-test)(\/|$)/.test(req.path)) &&
+      (process.env.NODE_ENV === 'production' || process.env.ENABLE_DEBUG_ROUTES !== 'true')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
+
 apiLog('🚀 Backend server starting up...');
 
 // Routes
@@ -63,6 +77,7 @@ app.use('/api/root', rootRoutes);
 app.use('/api/professor', professorRoutes);
 app.use('/api/student', studentRoutes);
 app.use('/api/chat', chatRoutes);
+app.use('/api/material-sources', materialSourceRoutes);
 app.use('/api/grading-assistant', gradingAssistantRoutes);
 app.use('/api/usage', usageRoutes);
 
@@ -70,6 +85,12 @@ app.use('/api/usage', usageRoutes);
 app.get('/api/health', (req, res) => {
   apiLog('❤️ HEALTH CHECK ENDPOINT HIT!');
   res.json({ message: 'LMS API is running!' });
+});
+
+app.get('/api/ready', async (_req, res) => {
+  const readiness = await checkRagReadiness();
+  res.setHeader('Cache-Control', 'no-store');
+  res.status(readiness.ready ? 200 : 503).json(readiness);
 });
 
 // Debug test endpoint
@@ -211,6 +232,9 @@ app.get('/api/db-test', async (req, res) => {
 const startServer = async () => {
   try {
     await connectDB();
+    void warmRagModels().catch(() => {
+      console.error('Local RAG models could not warm up; readiness remains unavailable.');
+    });
 
     app.listen(PORT, () => {
       apiLog(`\n🚀 Server is running on port ${PORT}`);

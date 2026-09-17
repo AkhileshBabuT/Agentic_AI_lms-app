@@ -3,6 +3,7 @@ import { pool } from '../config/database';
 import { authenticate, authorize } from '../middleware/auth';
 import { generateSignedUrl } from '../config/storage';
 import { getSourceOfTruthMode, setSourceOfTruthMode } from '../services/settingsService';
+import { purgeCourseIndex } from '../services/materials/deleteCourseIndex';
 
 const router = express.Router();
 
@@ -250,7 +251,7 @@ router.delete('/courses/:id', async (req, res) => {
 
     // Check if course exists
     const course = await client.query(
-      'SELECT id, title FROM courses WHERE id = $1',
+      'SELECT id, title FROM courses WHERE id = $1 FOR UPDATE',
       [id]
     );
 
@@ -258,6 +259,9 @@ router.delete('/courses/:id', async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Course not found' });
     }
+
+    // New immutable evidence references must be cleared before a permanent course purge.
+    await purgeCourseIndex(client, Number(id));
 
     // Delete related data first
     // Delete announcements for this course
@@ -634,7 +638,7 @@ router.get('/files/materials', async (req, res) => {
       FROM course_materials cm
       JOIN courses c ON cm.course_id = c.id
       JOIN users u ON cm.uploaded_by = u.id
-      WHERE 1=1
+      WHERE cm.deleted_at IS NULL
     `;
     const params: any[] = [];
     let paramCount = 1;
@@ -731,7 +735,7 @@ router.get('/files/submissions', async (req, res) => {
 router.get('/files/stats', async (req, res) => {
   try {
     const [materials, submissions, assignmentFiles] = await Promise.all([
-      pool.query('SELECT COUNT(*) as count, COALESCE(SUM(file_size), 0) as total_size FROM course_materials'),
+      pool.query('SELECT COUNT(*) as count, COALESCE(SUM(file_size), 0) as total_size FROM course_materials WHERE deleted_at IS NULL'),
       pool.query('SELECT COUNT(*) as count FROM assignment_submissions'),
       pool.query('SELECT COUNT(*) as count, COALESCE(SUM(file_size), 0) as total_size FROM submission_files')
     ]);
@@ -772,7 +776,7 @@ router.get('/files/download/:type/:id', async (req, res) => {
 
     if (type === 'material') {
       const result = await pool.query(
-        'SELECT file_path, file_name FROM course_materials WHERE id = $1',
+        'SELECT file_path, file_name FROM course_materials WHERE id = $1 AND deleted_at IS NULL',
         [id]
       );
 

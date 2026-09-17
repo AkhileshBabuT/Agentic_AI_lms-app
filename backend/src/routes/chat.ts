@@ -4,27 +4,42 @@ import { authenticate, authorize, requireActiveStatus } from '../middleware/auth
 import {
   validateChatMessage,
   validateSessionStatus,
-  validateContentType,
-  validatePositiveInteger,
   validatePagination
 } from '../middleware/validation';
 import { createRateLimitMiddleware } from '../utils/rateLimiter';
-import { SubjectChatbotAgent } from '../services/agents/SubjectChatbotAgent';
-import { EnhancedIntegrityVerificationAgent } from '../services/agents/EnhancedIntegrityVerificationAgent';
-import { AgentMessage } from '../services/agents/newAgentTypes';
-import { AIContext, AIMessage } from '../services/ai/types';
-import { getGroqFactCheckService } from '../services/factcheck/GroqFactCheckService';
-import { getSourceOfTruthMode } from '../services/settingsService';
-import { FACT_CHECK_CONFIG } from '../config/constants';
+import { answerCourseQuestion, persistCourseAnswer } from '../services/rag/CourseAnswerService';
+import { assertCourseAccess } from '../services/rag/access';
+import { getAuthorizedAnswerSources, getAuthorizedAnswerRecord, getAuthorizedSavedAnswerRecord } from '../services/rag/CitationService';
+import { RAG_CONFIG } from '../config/rag';
 import { logUsage } from '../utils/usageLogger';
-import fs from 'fs';
-import path from 'path';
 
-// File-only logging (no console output)
-const LOG_PATH = path.join(__dirname, '../../api-debug.log');
-function logToFile(message: string) {
-  const timestamp = new Date().toISOString();
-  fs.appendFileSync(LOG_PATH, `[${timestamp}] ${message}\n`);
+function positiveId(value: string): number | null {
+  return /^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value)) ? Number(value) : null;
+}
+
+function respondToAnswerError(res: Response, error: unknown): void {
+  const candidate = error as { status?: number; statusCode?: number; name?: string };
+  const status = candidate?.status ?? candidate?.statusCode;
+  if (status === 400) {
+    res.status(400).json({ error: 'The question is empty or exceeds the course assistant input limit.' });
+  } else if (status === 409) {
+    res.status(409).json({ error: 'Course materials changed while answering. Please try again.' });
+  } else if (status === 403 || status === 404) {
+    res.status(status).json({ error: 'Access to this course or source is unavailable' });
+  } else if (status === 429) {
+    res.status(429).json({ error: 'The course assistant is busy. Please try again shortly.' });
+  } else {
+    // Do not return provider bodies, prompts, credentials, or database details.
+    console.error('Course answer request failed', { type: candidate?.name ?? 'Error' });
+    res.status(503).json({ error: 'The course assistant is temporarily unavailable. Please try again.' });
+  }
+}
+
+/** Metadata from the retired scoring pipeline is not returned to course chat clients. */
+function withoutScores(metadata: Record<string, unknown> = {}): Record<string, unknown> {
+  const { confidence, trustScore, trust_score, validation_score, factCheck, fact_check,
+    emotionalFilter, sources, ...rest } = metadata;
+  return rest;
 }
 
 const router = express.Router();
@@ -81,10 +96,10 @@ router.get('/courses', async (req: Request, res: Response) => {
           COUNT(DISTINCT cs.id) as session_count,
           MAX(cs.last_activity_at) as last_chat_activity
         FROM courses c
-        INNER JOIN course_instructors ci ON c.id = ci.course_id
+        LEFT JOIN course_instructors ci ON c.id = ci.course_id AND ci.user_id = $1
         LEFT JOIN users u ON c.instructor_id = u.id
         LEFT JOIN chat_sessions cs ON c.id = cs.course_id AND cs.student_id = $1 AND cs.status = 'active'
-        WHERE ci.user_id = $1
+        WHERE ci.user_id = $1 OR c.instructor_id = $1
         GROUP BY c.id, c.title, c.description, u.full_name, ci.assigned_at
         ORDER BY last_chat_activity DESC NULLS LAST, ci.assigned_at DESC`,
         [userId]
@@ -124,7 +139,7 @@ router.post('/sessions', async (req: Request, res: Response) => {
   try {
     const userId = req.user?.userId;
     const userRole = req.user?.role;
-    const { courseId } = req.body;
+    const courseId = positiveId(String(req.body.courseId));
 
     if (!userId || !userRole) {
       return res.status(401).json({ error: 'Authentication required' });
@@ -134,32 +149,7 @@ router.post('/sessions', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Course ID is required' });
     }
 
-    // Verify course access based on role
-    let hasAccess = false;
-
-    if (userRole === 'student') {
-      const enrollmentCheck = await pool.query(
-        'SELECT id FROM enrollments WHERE user_id = $1 AND course_id = $2',
-        [userId, courseId]
-      );
-      hasAccess = enrollmentCheck.rows.length > 0;
-    } else if (userRole === 'professor') {
-      const instructorCheck = await pool.query(
-        'SELECT id FROM course_instructors WHERE user_id = $1 AND course_id = $2',
-        [userId, courseId]
-      );
-      hasAccess = instructorCheck.rows.length > 0;
-    } else if (userRole === 'root') {
-      const courseCheck = await pool.query(
-        'SELECT id FROM courses WHERE id = $1',
-        [courseId]
-      );
-      hasAccess = courseCheck.rows.length > 0;
-    }
-
-    if (!hasAccess) {
-      return res.status(403).json({ error: 'You do not have access to this course' });
-    }
+    await assertCourseAccess({ courseId, userId, role: userRole });
 
     // Get or create agent based on user role
     const agentType = userRole === 'professor' ? 'instructor_assistant' :
@@ -259,8 +249,7 @@ router.post('/sessions', async (req: Request, res: Response) => {
       session: completeSession.rows[0]
     });
   } catch (error) {
-    console.error('Error creating chat session:', error);
-    res.status(500).json({ error: 'Failed to create chat session' });
+    respondToAnswerError(res, error);
   }
 });
 
@@ -283,7 +272,8 @@ router.get('/sessions', validateSessionStatus(), validatePagination(), async (re
         ca.name as agent_name,
         ca.description as agent_description,
         (SELECT COUNT(*) FROM chat_messages WHERE session_id = cs.id) as message_count,
-        (SELECT content FROM chat_messages WHERE session_id = cs.id ORDER BY created_at DESC LIMIT 1) as last_message
+        (SELECT content FROM chat_messages WHERE session_id = cs.id AND sender_type = 'student'
+         AND is_deleted = false ORDER BY created_at DESC,id DESC LIMIT 1) as last_message
       FROM chat_sessions cs
       JOIN courses c ON cs.course_id = c.id
       JOIN chat_agents ca ON cs.agent_id = ca.id
@@ -314,9 +304,18 @@ router.get('/sessions', validateSessionStatus(), validatePagination(), async (re
 
     const result = await pool.query(finalQuery, params);
 
+    const accessibleSessions = [];
+    for (const session of result.rows) {
+      try {
+        await assertCourseAccess({ courseId: session.course_id, userId, role: req.user!.role });
+        accessibleSessions.push(session);
+      } catch (error) {
+        if ((error as { status?: number }).status !== 403) throw error;
+      }
+    }
     res.json({
       message: 'Chat sessions retrieved successfully',
-      sessions: result.rows
+      sessions: accessibleSessions
     });
   } catch (error) {
     console.error('Error fetching chat sessions:', error);
@@ -332,12 +331,16 @@ router.get('/sessions/:sessionId/messages', async (req: Request, res: Response) 
     if (!userId) {
       return res.status(401).json({ error: 'Authentication required' });
     }
-    const { sessionId } = req.params;
-    const { limit = 50, offset = 0 } = req.query;
+    const sessionId = positiveId(req.params.sessionId);
+    const limit = Number(req.query.limit ?? 50), offset = Number(req.query.offset ?? 0);
+    if (!sessionId || !Number.isSafeInteger(limit) || limit < 1 || limit > 100 ||
+        !Number.isSafeInteger(offset) || offset < 0) {
+      return res.status(400).json({ error: 'Invalid session ID or pagination' });
+    }
 
     // Verify session belongs to user
     const sessionCheck = await pool.query(
-      'SELECT id FROM chat_sessions WHERE id = $1 AND student_id = $2',
+      "SELECT id,course_id FROM chat_sessions WHERE id = $1 AND student_id = $2 AND status <> 'deleted'",
       [sessionId, userId]
     );
 
@@ -345,297 +348,73 @@ router.get('/sessions/:sessionId/messages', async (req: Request, res: Response) 
       return res.status(403).json({ error: 'Access denied to this chat session' });
     }
 
+    await assertCourseAccess({ courseId: sessionCheck.rows[0].course_id, userId,
+      role: req.user!.role });
+
     const result = await pool.query(
-      `SELECT * FROM chat_messages
+      `SELECT * FROM (SELECT * FROM chat_messages
        WHERE session_id = $1 AND is_deleted = false
-       ORDER BY created_at ASC
-       LIMIT $2 OFFSET $3`,
+       ORDER BY created_at DESC,id DESC
+       LIMIT $2 OFFSET $3) recent ORDER BY created_at ASC,id ASC`,
       [sessionId, limit, offset]
     );
 
+    const messages = await Promise.all(result.rows.map(async row => {
+      const metadata = withoutScores(row.message_metadata || {});
+      if (row.sender_type !== 'agent') return { ...row, message_metadata: metadata };
+      const record = await getAuthorizedAnswerRecord(row.id, userId, req.user!.role);
+      return { ...row,
+        content: record.restricted ? 'This answer is unavailable because its supporting material is no longer accessible.' : row.content,
+        sources: record.sources,
+        message_metadata: { ...metadata, sources: record.sources,
+          ...(record.restricted ? { answerStatus: 'source_unavailable' } : {}) } };
+    }));
     res.json({
       message: 'Messages retrieved successfully',
-      messages: result.rows
+      messages
     });
   } catch (error) {
-    console.error('Error fetching messages:', error);
-    res.status(500).json({ error: 'Failed to fetch messages' });
+    respondToAnswerError(res, error);
   }
 });
 
-// Send a message in a chat session (with stricter rate limit for AI calls)
-router.post(
-  '/sessions/:sessionId/messages',
-  createRateLimitMiddleware(40, 60000), // 40 AI messages per minute (accounts for metadata polling)
-  validateChatMessage(),
-  async (req: Request, res: Response) => {
+// Generate only from currently authorized, published evidence.
+router.post('/sessions/:sessionId/messages', createRateLimitMiddleware(40, 60000),
+  validateChatMessage(), async (req: Request, res: Response) => {
+    const user = req.user!;
+    const sessionId = positiveId(req.params.sessionId);
+    if (!sessionId) return res.status(400).json({ error: 'Invalid session ID' });
+    if (req.body.sanitizedContent.length > RAG_CONFIG.QUESTION_MAX_CHARS) {
+      return res.status(400).json({ error: 'The question exceeds the course assistant input limit.' });
+    }
+    const controller = new AbortController();
+    const onClose = () => { if (!res.writableEnded) controller.abort(); };
+    res.on('close', onClose);
     try {
-      logToFile('\n' + '='.repeat(80));
-      logToFile('📨 NEW MESSAGE RECEIVED');
-      logToFile('Session ID: ' + req.params.sessionId);
-      logToFile('Message: ' + req.body.content?.substring(0, 100));
-      logToFile('='.repeat(80));
-
-      const userId = req.user?.userId;
-
-      if (!userId) {
-        return res.status(401).json({ error: 'Authentication required' });
-      }
-
-      const { sessionId } = req.params;
-      const { sanitizedContent } = req.body;  // Use sanitized content from validation middleware
-
-      // Validate session ID
-      const parsedSessionId = parseInt(sessionId, 10);
-      if (isNaN(parsedSessionId) || parsedSessionId <= 0) {
-        return res.status(400).json({ error: 'Invalid session ID' });
-      }
-
-      // Verify session belongs to user
-      const sessionCheck = await pool.query(
-        'SELECT course_id FROM chat_sessions WHERE id = $1 AND student_id = $2 AND status = $3',
-        [parsedSessionId, userId, 'active']
-      );
-
-      if (sessionCheck.rows.length === 0) {
-        return res.status(403).json({ error: 'Access denied or session is not active' });
-      }
-
-      const courseId = sessionCheck.rows[0].course_id;
-
-      // Save student message with sanitized content
+      const session = await pool.query(
+        `SELECT course_id FROM chat_sessions WHERE id=$1 AND student_id=$2 AND status='active'`,
+        [sessionId, user.userId]);
+      if (!session.rows.length) return res.status(403).json({ error: 'Access denied or session is not active' });
+      const courseId = session.rows[0].course_id;
+      await assertCourseAccess({ courseId, userId: user.userId, role: user.role });
       const studentMessage = await pool.query(
-        `INSERT INTO chat_messages (session_id, sender_type, content)
-         VALUES ($1, $2, $3)
-         RETURNING *`,
-        [parsedSessionId, 'student', sanitizedContent]
-      );
-
-      // Get recent message history for context
-      const historyResult = await pool.query(
-        `SELECT sender_type, content FROM chat_messages
-       WHERE session_id = $1 AND is_deleted = false
-       ORDER BY created_at ASC
-       LIMIT 20`,
-        [parsedSessionId]
-      );
-
-      // Get course details
-      const courseResult = await pool.query(
-        'SELECT id, title, description FROM courses WHERE id = $1',
-        [courseId]
-      );
-      const course = courseResult.rows[0];
-
-      // Build AI context from conversation history
-      const conversationHistory: AIMessage[] = historyResult.rows.map(row => ({
-        role: (row.sender_type === 'student' ? 'user' : 'assistant') as 'user' | 'assistant',
-        content: row.content
-      }));
-
-      const aiContext: AIContext = {
-        conversationHistory,
-        courseMetadata: {
-          id: course.id,
-          title: course.title,
-          description: course.description
-        }
-      };
-
-      // Create agent message for the Subject Chatbot
-      const agentMessage: AgentMessage = {
-        content: sanitizedContent,  // Use sanitized content
-        userId,
-        role: 'student',
-        sessionId: parsedSessionId,
-        messageId: studentMessage.rows[0].id,
-        timestamp: new Date()
-      };
-
-      // Generate AI response using Subject Chatbot Agent
-      const chatbot = new SubjectChatbotAgent();
-      const agentResponse = await chatbot.execute(agentMessage, aiContext);
-
-      // Save AI response with metadata
-      const agentMessageResult = await pool.query(
-        `INSERT INTO chat_messages (session_id, sender_type, content, message_metadata)
-         VALUES ($1, $2, $3, $4)
-         RETURNING *`,
-        [parsedSessionId, 'agent', agentResponse.content, JSON.stringify({
-          confidence: agentResponse.confidence,
-          sourcesCount: agentResponse.sources?.length || 0,
-          emotionalFilter: agentResponse.metadata?.emotionalFilter || null,
-          sourceOfTruthMode: agentResponse.metadata?.sourceOfTruthMode || null
-        })]
-      );
-
-      const savedAgentMessageId = agentMessageResult.rows[0].id;
-
-      // Log LLM usage
-      logUsage({
-        userId,
-        actionType: 'llm_request',
-        endpoint: `/api/chat/sessions/${parsedSessionId}/messages`,
-        method: 'POST',
-        statusCode: 200,
-        metadata: {
-          sessionId: parsedSessionId,
-          courseId,
-          messageId: savedAgentMessageId,
-          confidence: agentResponse.confidence,
-          sourcesCount: agentResponse.sources?.length || 0,
-          responseLength: agentResponse.content.length,
-        },
-      });
-
-      // Run ENHANCED Integrity Verification Agent in background with proper error handling
-      // This will independently verify sources with web crawling and calculate trust score
-      logToFile('='.repeat(80));
-      logToFile('🔍 PREPARING TO START VERIFICATION');
-      logToFile('Message ID: ' + savedAgentMessageId);
-      logToFile('Course ID: ' + courseId);
-      logToFile('Response length: ' + agentResponse.content.length);
-      logToFile('Sources count: ' + (agentResponse.sources?.length || 0));
-      logToFile('Sources: ' + JSON.stringify(agentResponse.sources, null, 2));
-      logToFile('='.repeat(80));
-
-      // FIXED: Improved error handling for background verification
-      (async () => {
-        const MAX_RETRIES = 2;
-        let attempt = 0;
-
-        while (attempt <= MAX_RETRIES) {
-          try {
-            const verifier = new EnhancedIntegrityVerificationAgent();
-            logToFile(`✓ Verifier instance created (attempt ${attempt + 1}/${MAX_RETRIES + 1})`);
-
-            await verifier.verifyResponse(
-              savedAgentMessageId,
-              agentResponse.content,
-              agentResponse.sources || [],
-              courseId
-            );
-
-            logToFile('✅ Verification completed successfully');
-            break;  // Success, exit retry loop
-
-          } catch (err: any) {
-            attempt++;
-            logToFile(`❌ ERROR IN ENHANCED INTEGRITY VERIFICATION (attempt ${attempt}/${MAX_RETRIES + 1}):`);
-            logToFile('Error message: ' + err.message);
-            logToFile('Error stack: ' + err.stack);
-
-            if (attempt > MAX_RETRIES) {
-              // Store error state in database using correct schema columns
-              try {
-                await pool.query(
-                  `INSERT INTO message_trust_scores (
-                    message_id, trust_score, trust_level, verification_reasoning,
-                    source_verification_details, conflicts_detected
-                  ) VALUES ($1, $2, $3, $4, $5, $6)
-                  ON CONFLICT (message_id) DO UPDATE SET
-                    trust_score = EXCLUDED.trust_score,
-                    trust_level = EXCLUDED.trust_level,
-                    verification_reasoning = EXCLUDED.verification_reasoning,
-                    source_verification_details = EXCLUDED.source_verification_details,
-                    conflicts_detected = EXCLUDED.conflicts_detected,
-                    verification_timestamp = CURRENT_TIMESTAMP`,
-                  [
-                    savedAgentMessageId,
-                    0,
-                    'low',
-                    `Verification failed after ${MAX_RETRIES + 1} attempts: ${err.message}`,
-                    JSON.stringify({
-                      verification_details: [],
-                      evidence_summary: `Verification error after ${MAX_RETRIES + 1} attempts.`,
-                      error: err.message,
-                      timestamp: new Date().toISOString()
-                    }),
-                    ['Verification system encountered an error']
-                  ]
-                );
-                logToFile('⚠️ Verification failed after retries, error state recorded in database');
-              } catch (dbErr: any) {
-                logToFile('❌ Failed to record verification error in database: ' + dbErr.message);
-              }
-            } else {
-              // Wait before retry (exponential backoff)
-              const waitTime = Math.pow(2, attempt) * 1000;
-              logToFile(`⏳ Waiting ${waitTime}ms before retry...`);
-              await new Promise(resolve => setTimeout(resolve, waitTime));
-            }
-          }
-        }
-      })();
-
-      // Run Groq fact-check in background (INDEPENDENT of Gemini verification)
-      (async () => {
-        try {
-          const factChecker = getGroqFactCheckService();
-          if (factChecker.isEnabled()) {
-            // Fetch actual source content to give Groq real evidence for fact-checking
-            let sourceContent: Array<{ fileName: string; content: string }> = [];
-            try {
-              const sourceResult = await pool.query(
-                `SELECT cm.file_name, cmc.content_text
-                 FROM course_material_content cmc
-                 JOIN course_materials cm ON cmc.material_id = cm.id
-                 WHERE cm.course_id = $1 AND cmc.content_text IS NOT NULL
-                 ORDER BY cmc.last_indexed_at DESC
-                 LIMIT 5`,
-                [courseId]
-              );
-              sourceContent = sourceResult.rows.map(row => ({
-                fileName: row.file_name,
-                content: row.content_text.substring(0, FACT_CHECK_CONFIG.MAX_SOURCE_CHARS)
-              }));
-            } catch (srcErr: any) {
-              logToFile(`⚠️ Could not fetch source content for fact-check: ${srcErr.message}`);
-            }
-
-            await factChecker.factCheck(
-              savedAgentMessageId,
-              agentResponse.content,
-              sanitizedContent,
-              conversationHistory,
-              { title: course.title, description: course.description },
-              sourceContent,
-              await getSourceOfTruthMode()
-            );
-          }
-        } catch (err: any) {
-          logToFile('Fact-check error (non-blocking): ' + err.message);
-        }
-      })();
-
-      // Update session last activity
-      await pool.query(
-        'UPDATE chat_sessions SET last_activity_at = CURRENT_TIMESTAMP WHERE id = $1',
-        [parsedSessionId]
-      );
-
-      res.json({
-        message: 'Message sent successfully',
-        studentMessage: studentMessage.rows[0],
-        agentMessage: {
-          ...agentMessageResult.rows[0],
-          sources: agentResponse.sources,
-          confidence: agentResponse.confidence
-        }
-      });
-    } catch (error: any) {
-      console.error('❌ ERROR SENDING MESSAGE:');
-      console.error('Error type:', error.constructor.name);
-      console.error('Error message:', error.message);
-      console.error('Error stack:', error.stack);
-      console.error('Full error:', error);
-
-      // Return more detailed error for debugging
-      const errorMessage = error.message || 'Failed to send message';
-      res.status(500).json({
-        error: 'Failed to send message',
-        details: process.env.NODE_ENV === 'development' ? errorMessage : undefined
-      });
+        `INSERT INTO chat_messages(session_id,sender_type,content) VALUES($1,'student',$2) RETURNING *`,
+        [sessionId, req.body.sanitizedContent]);
+      const answer = await answerCourseQuestion({ courseId, userId: user.userId, role: user.role,
+        question: req.body.sanitizedContent, signal: controller.signal });
+      if (controller.signal.aborted) return;
+      const agentMessage = await persistCourseAnswer({ sessionId, courseId, userId: user.userId,
+        role: user.role, answer, questionMessageId: studentMessage.rows[0].id });
+      logUsage({ userId: user.userId, actionType: 'llm_request',
+        endpoint: `/api/chat/sessions/${sessionId}/messages`, method: 'POST', statusCode: 200,
+        metadata: { courseId, sessionId, messageId: agentMessage.id, answerStatus: answer.status,
+          sourcesCount: answer.sources.length } });
+      res.json({ message: 'Message sent successfully', studentMessage: studentMessage.rows[0],
+        agentMessage: { ...agentMessage, sources: answer.sources } });
+    } catch (error) {
+      if (!controller.signal.aborted) respondToAnswerError(res, error);
+    } finally {
+      res.off('close', onClose);
     }
   });
 
@@ -717,10 +496,26 @@ router.get('/generated-content', async (req: Request, res: Response) => {
 
     const result = await pool.query(query, params);
 
-    res.json({
-      message: 'Generated content retrieved successfully',
-      content: result.rows
-    });
+    const savedContent = [];
+    for (const row of result.rows) {
+      try { await assertCourseAccess({ courseId: row.course_id, userId, role: req.user!.role }); }
+      catch (error) { if ((error as { status?: number }).status === 403) continue; throw error; }
+      const metadata = withoutScores(row.content_metadata || {});
+      const originalId = Number(metadata.originalMessageId);
+      if (Number.isSafeInteger(originalId) && originalId > 0) {
+        try {
+          const record = await getAuthorizedSavedAnswerRecord(originalId, userId, req.user!.role);
+          savedContent.push({ ...row,
+            content: record.restricted ? 'This saved answer is unavailable because its supporting source is no longer accessible.' : row.content,
+            content_metadata: { ...metadata, sources: record.sources } });
+        } catch (error) {
+          if ((error as { status?: number }).status !== 403) throw error;
+          savedContent.push({ ...row, content: 'This saved answer is no longer available.',
+            content_metadata: { ...metadata, sources: [], answerStatus: 'source_unavailable' } });
+        }
+      } else savedContent.push({ ...row, content_metadata: metadata });
+    }
+    res.json({ message: 'Generated content retrieved successfully', content: savedContent });
   } catch (error) {
     console.error('Error fetching generated content:', error);
     res.status(500).json({ error: 'Failed to fetch generated content' });
@@ -752,13 +547,29 @@ router.post('/generated-content', async (req: Request, res: Response) => {
     }
 
     const { course_id, agent_id } = sessionCheck.rows[0];
+    await assertCourseAccess({ courseId: course_id, userId, role: req.user!.role });
+
+    let savedText = content;
+    let savedMetadata = withoutScores(metadata || {});
+    if (metadata?.originalMessageId !== undefined) {
+      const originalId = positiveId(String(metadata.originalMessageId));
+      if (!originalId) return res.status(400).json({ error: 'Invalid original answer ID' });
+      const original = await pool.query(`SELECT content,message_metadata FROM chat_messages
+        WHERE id=$1 AND session_id=$2 AND sender_type='agent' AND is_deleted=false`, [originalId, sessionId]);
+      if (!original.rows.length) return res.status(403).json({ error: 'The original answer is unavailable' });
+      const record = await getAuthorizedAnswerRecord(originalId, userId, req.user!.role);
+      if (record.restricted) return res.status(409).json({ error: 'Supporting course material is no longer accessible' });
+      savedText = original.rows[0].content;
+      savedMetadata = { ...withoutScores(original.rows[0].message_metadata || {}),
+        originalMessageId: originalId, sources: record.sources };
+    }
 
     const result = await pool.query(
       `INSERT INTO agent_generated_content
        (agent_id, student_id, course_id, session_id, content_type, title, content, content_metadata, is_saved)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
-      [agent_id, userId, course_id, sessionId, contentType, title, content, JSON.stringify(metadata || {}), true]
+      [agent_id, userId, course_id, sessionId, contentType, title, savedText, JSON.stringify(savedMetadata), true]
     );
 
     res.json({
@@ -797,289 +608,59 @@ router.delete('/generated-content/:contentId', async (req: Request, res: Respons
   }
 });
 
-// Regenerate last AI response
-router.post('/sessions/:sessionId/regenerate', async (req: Request, res: Response) => {
-  try {
-    const userId = req.user?.userId;
+// Preserve the old answer unless the replacement and its citations commit successfully.
+router.post('/sessions/:sessionId/regenerate', createRateLimitMiddleware(40, 60000),
+  async (req: Request, res: Response) => {
+    const user = req.user!;
+    const sessionId = positiveId(req.params.sessionId);
+    if (!sessionId) return res.status(400).json({ error: 'Invalid session ID' });
+    const controller = new AbortController();
+    const onClose = () => { if (!res.writableEnded) controller.abort(); };
+    res.on('close', onClose);
+    try {
+      const session = await pool.query(
+        `SELECT course_id FROM chat_sessions WHERE id=$1 AND student_id=$2 AND status='active'`,
+        [sessionId, user.userId]);
+      if (!session.rows.length) return res.status(403).json({ error: 'Access denied or session is not active' });
+      const courseId = session.rows[0].course_id;
+      await assertCourseAccess({ courseId, userId: user.userId, role: user.role });
+      const lastQuestion = await pool.query(
+        `SELECT id,content FROM chat_messages WHERE session_id=$1 AND sender_type='student'
+         AND is_deleted=false ORDER BY created_at DESC,id DESC LIMIT 1`, [sessionId]);
+      if (!lastQuestion.rows.length) return res.status(400).json({ error: 'No student messages found' });
+      const previous = await pool.query(
+        `SELECT id FROM chat_messages WHERE session_id=$1 AND sender_type='agent'
+         AND is_deleted=false AND id>$2 ORDER BY created_at DESC,id DESC LIMIT 1`,
+        [sessionId, lastQuestion.rows[0].id]);
+      const answer = await answerCourseQuestion({ courseId, userId: user.userId, role: user.role,
+        question: lastQuestion.rows[0].content, signal: controller.signal });
+      if (controller.signal.aborted) return;
+      const agentMessage = await persistCourseAnswer({ sessionId, courseId, userId: user.userId,
+        role: user.role, answer, regeneratedFrom: previous.rows[0]?.id,
+        questionMessageId: lastQuestion.rows[0].id, isRegeneration: true });
+      res.json({ message: 'Response regenerated successfully',
+        agentMessage: { ...agentMessage, sources: answer.sources } });
+    } catch (error) {
+      if (!controller.signal.aborted) respondToAnswerError(res, error);
+    } finally { res.off('close', onClose); }
+  });
 
-    if (!userId) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
-    const { sessionId } = req.params;
-
-    // Verify session belongs to user
-    const sessionCheck = await pool.query(
-      'SELECT course_id FROM chat_sessions WHERE id = $1 AND student_id = $2 AND status = $3',
-      [sessionId, userId, 'active']
-    );
-
-    if (sessionCheck.rows.length === 0) {
-      return res.status(403).json({ error: 'Access denied or session is not active' });
-    }
-
-    const courseId = sessionCheck.rows[0].course_id;
-
-    // Get the last student message
-    const lastStudentMessage = await pool.query(
-      `SELECT content FROM chat_messages
-       WHERE session_id = $1 AND sender_type = 'student' AND is_deleted = false
-       ORDER BY created_at DESC
-       LIMIT 1`,
-      [sessionId]
-    );
-
-    if (lastStudentMessage.rows.length === 0) {
-      return res.status(400).json({ error: 'No student messages found' });
-    }
-
-    // Mark the last agent message as deleted
-    await pool.query(
-      `UPDATE chat_messages
-       SET is_deleted = true
-       WHERE session_id = $1 AND sender_type = 'agent' AND is_deleted = false
-       AND id = (
-         SELECT id FROM chat_messages
-         WHERE session_id = $1 AND sender_type = 'agent' AND is_deleted = false
-         ORDER BY created_at DESC
-         LIMIT 1
-       )`,
-      [sessionId]
-    );
-
-    // Get message history
-    const historyResult = await pool.query(
-      `SELECT sender_type, content FROM chat_messages
-       WHERE session_id = $1 AND is_deleted = false
-       ORDER BY created_at ASC
-       LIMIT 20`,
-      [sessionId]
-    );
-
-    // Get course details
-    const courseResult = await pool.query(
-      'SELECT id, title, description FROM courses WHERE id = $1',
-      [courseId]
-    );
-    const course = courseResult.rows[0];
-
-    // Build AI context
-    const conversationHistory: AIMessage[] = historyResult.rows.map(row => ({
-      role: (row.sender_type === 'student' ? 'user' : 'assistant') as 'user' | 'assistant',
-      content: row.content
-    }));
-
-    const aiContext: AIContext = {
-      conversationHistory,
-      courseMetadata: {
-        id: course.id,
-        title: course.title,
-        description: course.description
-      }
-    };
-
-    // Create agent message
-    const agentMessage: AgentMessage = {
-      content: lastStudentMessage.rows[0].content,
-      userId,
-      role: 'student',
-      sessionId: parseInt(sessionId),
-      timestamp: new Date()
-    };
-
-    // Generate new AI response using Subject Chatbot
-    const chatbot = new SubjectChatbotAgent();
-    const agentResponse = await chatbot.execute(agentMessage, aiContext);
-
-    // Save new AI response
-    const newAgentMessageResult = await pool.query(
-      `INSERT INTO chat_messages (session_id, sender_type, content, message_metadata)
-       VALUES ($1, $2, $3, $4)
-       RETURNING *`,
-      [sessionId, 'agent', agentResponse.content, JSON.stringify({
-        regenerated: true,
-        confidence: agentResponse.confidence,
-        sourcesCount: agentResponse.sources?.length || 0,
-        sourceOfTruthMode: agentResponse.metadata?.sourceOfTruthMode || null
-      })]
-    );
-
-    const savedAgentMessageId = newAgentMessageResult.rows[0].id;
-
-    // Log LLM usage for regeneration
-    logUsage({
-      userId,
-      actionType: 'llm_request',
-      endpoint: `/api/chat/sessions/${sessionId}/regenerate`,
-      method: 'POST',
-      statusCode: 200,
-      metadata: {
-        sessionId: parseInt(sessionId),
-        courseId,
-        messageId: savedAgentMessageId,
-        regenerated: true,
-        confidence: agentResponse.confidence,
-        sourcesCount: agentResponse.sources?.length || 0,
-      },
-    });
-
-    // Run ENHANCED Integrity Verification in background
-    const verifier = new EnhancedIntegrityVerificationAgent();
-    verifier.verifyResponse(
-      savedAgentMessageId,
-      agentResponse.content,
-      agentResponse.sources || [],
-      courseId
-    ).catch(err => {
-      console.error('Error in enhanced integrity verification:', err);
-    });
-
-    res.json({
-      message: 'Response regenerated successfully',
-      agentMessage: {
-        ...newAgentMessageResult.rows[0],
-        sources: agentResponse.sources,
-        confidence: agentResponse.confidence
-      }
-    });
-  } catch (error) {
-    console.error('Error regenerating response:', error);
-    res.status(500).json({ error: 'Failed to regenerate response' });
-  }
+// Compatibility endpoints: scoring is retired and never triggers a model request.
+router.get('/messages/:messageId/trust-score', (_req: Request, res: Response) => {
+  res.status(410).json({ error: 'Answer scoring has been retired. Use document references.' });
+});
+router.get('/messages/:messageId/fact-check', (_req: Request, res: Response) => {
+  res.status(410).json({ error: 'Answer scoring has been retired. Use document references.' });
 });
 
-// Get trust score for a message
-router.get('/messages/:messageId/trust-score', async (req: Request, res: Response) => {
-  try {
-    const userId = req.user?.userId;
-    if (!userId) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
-
-    const { messageId } = req.params;
-
-    // Verify user has access to this message
-    const messageCheck = await pool.query(
-      `SELECT cm.id
-       FROM chat_messages cm
-       JOIN chat_sessions cs ON cm.session_id = cs.id
-       WHERE cm.id = $1 AND cs.student_id = $2`,
-      [messageId, userId]
-    );
-
-    if (messageCheck.rows.length === 0) {
-      return res.status(403).json({ error: 'Access denied to this message' });
-    }
-
-    // Get trust score
-    const trustScoreResult = await pool.query(
-      'SELECT * FROM message_trust_scores WHERE message_id = $1',
-      [messageId]
-    );
-
-    if (trustScoreResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Trust score not yet calculated' });
-    }
-
-    const trustRow = trustScoreResult.rows[0];
-
-    res.json({
-      message: 'Trust score retrieved successfully',
-      trustScore: {
-        ...trustRow,
-        // New validation / verifier-disagreement fields (nullable for older messages).
-        // Snake_case to match the existing sibling keys (trust_score, trust_level, ...)
-        validation_score: trustRow.validation_score ?? null,
-        validation_min_sentence_score: trustRow.validation_min_sentence_score ?? null,
-        verifiers_disagree: trustRow.verifiers_disagree ?? null,
-        low_validation_warning: trustRow.low_validation_warning ?? null
-      }
-    });
-  } catch (error) {
-    console.error('Error fetching trust score:', error);
-    res.status(500).json({ error: 'Failed to fetch trust score' });
-  }
-});
-
-// Get fact-check result for a message (Groq independent verification)
-router.get('/messages/:messageId/fact-check', async (req: Request, res: Response) => {
-  try {
-    const userId = req.user?.userId;
-    if (!userId) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
-
-    const { messageId } = req.params;
-
-    // Verify user has access to this message
-    const messageCheck = await pool.query(
-      `SELECT cm.id
-       FROM chat_messages cm
-       JOIN chat_sessions cs ON cm.session_id = cs.id
-       WHERE cm.id = $1 AND cs.student_id = $2`,
-      [messageId, userId]
-    );
-
-    if (messageCheck.rows.length === 0) {
-      return res.status(403).json({ error: 'Access denied to this message' });
-    }
-
-    // Get fact-check result
-    const factCheckResult = await pool.query(
-      'SELECT * FROM fact_check_results WHERE message_id = $1',
-      [messageId]
-    );
-
-    if (factCheckResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Fact-check result not yet available' });
-    }
-
-    res.json({
-      message: 'Fact-check result retrieved successfully',
-      factCheck: factCheckResult.rows[0]
-    });
-  } catch (error) {
-    console.error('Error fetching fact-check result:', error);
-    res.status(500).json({ error: 'Failed to fetch fact-check result' });
-  }
-});
-
-// Get sources for a message
 router.get('/messages/:messageId/sources', async (req: Request, res: Response) => {
+  const messageId = positiveId(req.params.messageId);
+  if (!messageId) return res.status(400).json({ error: 'Invalid message ID' });
   try {
-    const userId = req.user?.userId;
-    if (!userId) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
-
-    const { messageId } = req.params;
-
-    // Verify user has access to this message
-    const messageCheck = await pool.query(
-      `SELECT cm.id
-       FROM chat_messages cm
-       JOIN chat_sessions cs ON cm.session_id = cs.id
-       WHERE cm.id = $1 AND cs.student_id = $2`,
-      [messageId, userId]
-    );
-
-    if (messageCheck.rows.length === 0) {
-      return res.status(403).json({ error: 'Access denied to this message' });
-    }
-
-    // Get sources
-    const sourcesResult = await pool.query(
-      'SELECT * FROM response_sources WHERE message_id = $1 ORDER BY relevance_score DESC',
-      [messageId]
-    );
-
-    res.json({
-      message: 'Sources retrieved successfully',
-      sources: sourcesResult.rows
-    });
-  } catch (error) {
-    console.error('Error fetching sources:', error);
-    res.status(500).json({ error: 'Failed to fetch sources' });
-  }
+    const sources = await getAuthorizedAnswerSources({ messageId, userId: req.user!.userId,
+      role: req.user!.role });
+    res.json({ message: 'Sources retrieved successfully', sources });
+  } catch (error) { respondToAnswerError(res, error); }
 });
 
 export default router;

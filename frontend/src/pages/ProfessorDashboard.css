@@ -444,6 +444,7 @@
 }
 
 /* Materials Section */
+.material-index-help { color: #64748b; font-size: 13px; margin: 8px 0 16px; }
 .materials-list {
   display: grid;
   gap: 1rem;

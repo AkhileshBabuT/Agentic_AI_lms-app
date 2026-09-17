@@ -3,8 +3,9 @@ import { pool } from '../config/database';
 import { authenticate, authorize, requireApprovedProfessor } from '../middleware/auth';
 import { uploadCourseMaterials, uploadAssignmentFiles, handleMulterError } from '../middleware/upload';
 import { uploadFile, deleteFile, generateSignedUrl, downloadFile } from '../config/storage';
-import { extractTextFromFile } from '../services/documentProcessor';
-import { generateEmbeddings, embeddingToPostgresVector } from '../services/embeddingService';
+import { queueMaterialUpload } from '../services/materials/ingestion';
+import { MaterialValidationError } from '../services/materials/fileValidation';
+import { retryMaterialIngestion } from '../services/materials/retryIngestion';
 import { logUsage } from '../utils/usageLogger';
 
 const router = express.Router();
@@ -533,192 +534,55 @@ router.delete('/announcements/:id', async (req, res) => {
 
 // Upload course materials
 router.post('/materials', uploadCourseMaterials, handleMulterError, async (req: Request, res: Response) => {
-  const client = await pool.connect();
-
+  let stage = 'course_access';
   try {
     const files = req.files as Express.Multer.File[];
-
-    if (!files || files.length === 0) {
-      return res.status(400).json({ error: 'No files uploaded' });
-    }
-
-    // Get professor's course
-    const courseResult = await pool.query(
-      'SELECT course_id FROM course_instructors WHERE user_id = $1',
-      [req.user!.userId]
-    );
-
-    if (courseResult.rows.length === 0) {
-      return res.status(404).json({ error: 'No course assigned' });
-    }
-
-    const courseId = courseResult.rows[0].course_id;
-
-    // Get optional folder ID from form data
-    const folderId = req.body.folderId ? parseInt(req.body.folderId) : null;
-
-    // If folderId provided, verify it belongs to this course
+    if (!files?.length) return res.status(400).json({error: 'No files uploaded'});
+    const course = await pool.query('SELECT course_id FROM course_instructors WHERE user_id=$1', [req.user!.userId]);
+    if (!course.rowCount) return res.status(404).json({error: 'No course assigned'});
+    const courseId = course.rows[0].course_id;
+    const folderId = req.body.folderId ? Number(req.body.folderId) : null;
+    if (folderId !== null && (!Number.isInteger(folderId) || folderId <= 0)) return res.status(400).json({error: 'Invalid folder'});
     if (folderId) {
-      const folderCheck = await pool.query(
-        'SELECT id FROM material_folders WHERE id = $1 AND course_id = $2',
-        [folderId, courseId]
-      );
-      if (folderCheck.rows.length === 0) {
-        return res.status(404).json({ error: 'Target folder not found' });
-      }
+      const folder = await pool.query('SELECT id FROM material_folders WHERE id=$1 AND course_id=$2', [folderId, courseId]);
+      if (!folder.rowCount) return res.status(404).json({error: 'Target folder not found'});
     }
-
-    await client.query('BEGIN');
-
-    const uploadedMaterials = [];
-
+    const materials = [];
+    // No transaction remains open across GCS, parsing, or model execution.
     for (const file of files) {
-      // Generate unique file path
-      const timestamp = Date.now();
-      const filePath = `course-materials/${courseId}/${timestamp}-${file.originalname}`;
-
-      // Upload to GCS
-      const uploadResult = await uploadFile(file, filePath);
-
-      // Save to database
-      const result = await client.query(
-        `INSERT INTO course_materials (course_id, file_name, file_path, file_size, file_type, uploaded_by, folder_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING *`,
-        [courseId, uploadResult.fileName, uploadResult.filePath, uploadResult.fileSize, file.mimetype, req.user!.userId, folderId]
-      );
-
-      const materialId = result.rows[0].id;
-
-      // Extract text content from the uploaded file
-      try {
-        console.log(`Extracting text from ${file.originalname}...`);
-        const processedDoc = await extractTextFromFile(
-          file.buffer,
-          file.originalname,
-          file.mimetype
-        );
-
-        // Save extracted content to course_material_content table
-        await client.query(
-          `INSERT INTO course_material_content (material_id, content_text, content_chunks, metadata)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (material_id) DO UPDATE
-           SET content_text = EXCLUDED.content_text,
-               content_chunks = EXCLUDED.content_chunks,
-               metadata = EXCLUDED.metadata,
-               last_indexed_at = CURRENT_TIMESTAMP`,
-          [
-            materialId,
-            processedDoc.content_text,
-            JSON.stringify(processedDoc.content_chunks),
-            JSON.stringify(processedDoc.metadata)
-          ]
-        );
-
-        console.log(`✓ Extracted ${processedDoc.content_chunks.length} chunks from ${file.originalname}`);
-
-        // Generate embeddings for each chunk (only if extraction was successful)
-        if (processedDoc.content_chunks.length > 0 && processedDoc.content_text.trim().length > 0) {
-          try {
-            console.log(`Generating embeddings for ${processedDoc.content_chunks.length} chunks...`);
-
-            // Extract chunk texts for embedding generation
-            const chunkTexts = processedDoc.content_chunks.map(chunk => chunk.text);
-
-            // Generate embeddings in batches
-            const embeddings = await generateEmbeddings(chunkTexts, 5);
-
-            // Store embeddings in database
-            for (let i = 0; i < processedDoc.content_chunks.length; i++) {
-              const chunk = processedDoc.content_chunks[i];
-              const embedding = embeddings[i];
-
-              await client.query(
-                `INSERT INTO course_material_embeddings
-                 (material_id, chunk_id, chunk_text, chunk_metadata, embedding)
-                 VALUES ($1, $2, $3, $4, $5::vector)
-                 ON CONFLICT (material_id, chunk_id) DO UPDATE
-                 SET chunk_text = EXCLUDED.chunk_text,
-                     chunk_metadata = EXCLUDED.chunk_metadata,
-                     embedding = EXCLUDED.embedding,
-                     created_at = CURRENT_TIMESTAMP`,
-                [
-                  materialId,
-                  chunk.chunk_id,
-                  chunk.text,
-                  JSON.stringify(chunk.metadata),
-                  embeddingToPostgresVector(embedding)
-                ]
-              );
-            }
-
-            console.log(`✓ Generated and stored ${embeddings.length} embeddings for ${file.originalname}`);
-          } catch (embeddingError) {
-            console.error(`Error generating embeddings for ${file.originalname}:`, embeddingError);
-            // Continue even if embedding generation fails
-            // The text is still stored, embeddings can be generated later via batch script
-          }
-        }
-      } catch (extractionError) {
-        console.error(`Error extracting text from ${file.originalname}:`, extractionError);
-        // Continue with upload even if extraction fails
-        // Save error information to content table
-        await client.query(
-          `INSERT INTO course_material_content (material_id, content_text, content_chunks, metadata)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (material_id) DO UPDATE
-           SET metadata = EXCLUDED.metadata`,
-          [
-            materialId,
-            '',
-            JSON.stringify([]),
-            JSON.stringify({
-              extraction_method: 'failed',
-              extraction_date: new Date().toISOString(),
-              error: extractionError instanceof Error ? extractionError.message : 'Unknown error'
-            })
-          ]
-        );
-      }
-
-      uploadedMaterials.push(result.rows[0]);
+      stage = 'attachment_registration';
+      const material = await queueMaterialUpload({courseId, userId: req.user!.userId, folderId, file});
+      materials.push(material);
+      await logUsage({userId: req.user!.userId, actionType: 'file_upload', endpoint: '/api/professor/materials', method: 'POST', statusCode: 202,
+        metadata: {materialId: material.id, fileSize: file.size, ingestionStatus: material.ingestion_status}});
     }
-
-    await client.query('COMMIT');
-
-    // Log each file upload
-    for (const material of uploadedMaterials) {
-      logUsage({
-        userId: req.user!.userId,
-        actionType: 'file_upload',
-        endpoint: '/api/professor/materials',
-        method: 'POST',
-        statusCode: 201,
-        metadata: {
-          courseId,
-          materialId: material.id,
-          fileName: material.file_name,
-          fileSize: material.file_size,
-          fileType: material.file_type,
-        },
-      });
-    }
-
-    res.status(201).json({
-      message: 'Course materials uploaded successfully',
-      materials: uploadedMaterials
-    });
+    return res.status(202).json({message: 'Attachments accepted; indexing runs in the background', materials});
   } catch (error) {
-    await client.query('ROLLBACK');
-    console.error('Error uploading course materials:', error);
-    res.status(500).json({ error: 'Failed to upload course materials' });
-  } finally {
-    client.release();
+    if (error instanceof MaterialValidationError) {
+      return res.status(400).json({ error: error.message, code: 'MATERIAL_VALIDATION_FAILED' });
+    }
+    const databaseCode = (error as { code?: unknown })?.code;
+    console.error('Course material upload failed', {
+      stage,
+      databaseCode: typeof databaseCode === 'string' && /^[A-Z0-9]{5}$/.test(databaseCode) ? databaseCode : undefined,
+    });
+    return res.status(500).json({error: 'Could not accept the attachment; check material status before retrying'});
   }
 });
 
 // Get all course materials (optionally filtered by folder)
+router.post('/materials/:id/reindex', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({error: 'Invalid material'});
+  try {
+    const ingestionStatus = await retryMaterialIngestion(id, req.user!.userId);
+    return res.status(202).json({message: 'Native indexing retry accepted; OCR remains disabled',ingestion_status: ingestionStatus});
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '';
+    return res.status(message === 'Material not found' ? 404 : 409).json({error: message === 'Material not found' ? message : 'Stored original is unavailable for retry; inspect upload status'});
+  }
+});
+
 router.get('/materials', async (req, res) => {
   try {
     // folderId param: undefined = all materials (backward compat), 'null'/'' = root only, number = specific folder
@@ -749,7 +613,7 @@ router.get('/materials', async (req, res) => {
         SELECT cm.*, u.full_name as uploader_name
         FROM course_materials cm
         JOIN users u ON cm.uploaded_by = u.id
-        WHERE cm.course_id = $1
+        WHERE cm.course_id = $1 AND cm.deleted_at IS NULL
         ORDER BY cm.uploaded_at DESC
       `;
       params = [courseId];
@@ -759,7 +623,7 @@ router.get('/materials', async (req, res) => {
         SELECT cm.*, u.full_name as uploader_name
         FROM course_materials cm
         JOIN users u ON cm.uploaded_by = u.id
-        WHERE cm.course_id = $1 AND cm.folder_id IS NULL
+        WHERE cm.course_id = $1 AND cm.deleted_at IS NULL AND cm.folder_id IS NULL
         ORDER BY cm.uploaded_at DESC
       `;
       params = [courseId];
@@ -777,7 +641,7 @@ router.get('/materials', async (req, res) => {
         SELECT cm.*, u.full_name as uploader_name
         FROM course_materials cm
         JOIN users u ON cm.uploaded_by = u.id
-        WHERE cm.course_id = $1 AND cm.folder_id = $2
+        WHERE cm.course_id = $1 AND cm.deleted_at IS NULL AND cm.folder_id = $2
         ORDER BY cm.uploaded_at DESC
       `;
       params = [courseId, folderId];
@@ -818,7 +682,7 @@ router.delete('/materials/:id', async (req, res) => {
 
     // Get material details
     const materialResult = await client.query(
-      'SELECT * FROM course_materials WHERE id = $1 AND course_id = $2',
+      'SELECT * FROM course_materials WHERE id = $1 AND course_id = $2 AND deleted_at IS NULL',
       [id, courseId]
     );
 
@@ -829,11 +693,8 @@ router.delete('/materials/:id', async (req, res) => {
 
     const material = materialResult.rows[0];
 
-    // Delete from GCS
-    await deleteFile(material.file_path);
-
-    // Delete from database
-    await client.query('DELETE FROM course_materials WHERE id = $1', [id]);
+    // Retain immutable attachment versions for audit; retrieval rechecks deletion.
+    await client.query("UPDATE course_materials SET deleted_at=now(),visibility='deleted',ingestion_status='deleted' WHERE id=$1", [id]);
 
     await client.query('COMMIT');
 
@@ -869,7 +730,7 @@ router.get('/materials/:id/download', async (req, res) => {
 
     // Get material
     const result = await pool.query(
-      'SELECT * FROM course_materials WHERE id = $1 AND course_id = $2',
+      'SELECT * FROM course_materials WHERE id = $1 AND course_id = $2 AND deleted_at IS NULL',
       [id, courseId]
     );
 
@@ -1135,41 +996,15 @@ router.delete('/folders/:id', async (req, res) => {
 
     await client.query('BEGIN');
 
-    // 1. Get ALL files in this folder and all descendant folders (recursive CTE)
-    const filesResult = await client.query(`
+    // Soft-delete descendants; keep source versions and citation provenance.
+    const deletedMaterials = await client.query(`
       WITH RECURSIVE descendant_folders AS (
-        SELECT id FROM material_folders WHERE id = $1
-        UNION ALL
-        SELECT mf.id
-        FROM material_folders mf
-        JOIN descendant_folders df ON mf.parent_id = df.id
+        SELECT id FROM material_folders WHERE id=$1
+        UNION ALL SELECT mf.id FROM material_folders mf JOIN descendant_folders df ON mf.parent_id=df.id
       )
-      SELECT cm.id, cm.file_path
-      FROM course_materials cm
-      WHERE cm.folder_id IN (SELECT id FROM descendant_folders)
-    `, [id]);
-
-    // 2. Delete files from GCS
-    for (const file of filesResult.rows) {
-      try {
-        await deleteFile(file.file_path);
-      } catch (gcsError) {
-        console.error(`Failed to delete GCS file ${file.file_path}:`, gcsError);
-      }
-    }
-
-    // 3. Delete all files in this folder tree from DB
-    await client.query(`
-      WITH RECURSIVE descendant_folders AS (
-        SELECT id FROM material_folders WHERE id = $1
-        UNION ALL
-        SELECT mf.id
-        FROM material_folders mf
-        JOIN descendant_folders df ON mf.parent_id = df.id
-      )
-      DELETE FROM course_materials
-      WHERE folder_id IN (SELECT id FROM descendant_folders)
-    `, [id]);
+      UPDATE course_materials SET deleted_at=now(),visibility='deleted',ingestion_status='deleted',folder_id=NULL
+      WHERE folder_id IN (SELECT id FROM descendant_folders) AND course_id=$2
+    `, [id, courseId]);
 
     // 4. Delete the folder (CASCADE on parent_id FK handles subfolders)
     await client.query('DELETE FROM material_folders WHERE id = $1', [id]);
@@ -1178,7 +1013,7 @@ router.delete('/folders/:id', async (req, res) => {
 
     res.json({
       message: 'Folder and all contents deleted successfully',
-      deletedFiles: filesResult.rows.length
+      deletedFiles: deletedMaterials.rowCount
     });
   } catch (error) {
     await client.query('ROLLBACK');

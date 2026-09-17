@@ -193,7 +193,7 @@ const ChatInterface: React.FC = () => {
         title: saveContentTitle.trim(),
         content: selectedMessageToSave.content,
         metadata: {
-          messageId: selectedMessageToSave.id,
+          originalMessageId: selectedMessageToSave.id,
           savedAt: new Date().toISOString()
         }
       });
@@ -354,7 +354,7 @@ const ChatInterface: React.FC = () => {
                           )}
                         </div>
 
-                        {/* Show sources and trust score for agent messages */}
+                        {/* Revalidated supporting document references */}
                         {message.sender_type === 'agent' && (
                           <MessageMetadata
                             messageId={message.id}

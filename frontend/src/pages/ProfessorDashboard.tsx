@@ -4,6 +4,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../components/Toast';
 import { professorAPI } from '../services/api';
 import { validateByType } from '../utils/fileValidation';
+import MaterialIndexStatus from '../components/MaterialIndexStatus';
 import './ProfessorDashboard.css';
 
 const ProfessorDashboard: React.FC = () => {
@@ -32,6 +33,7 @@ const ProfessorDashboard: React.FC = () => {
   const [showCreateFolder, setShowCreateFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [creatingFolder, setCreatingFolder] = useState(false);
+  const [retryingMaterialId, setRetryingMaterialId] = useState<number | null>(null);
 
   useEffect(() => {
     loadCourse();
@@ -178,7 +180,7 @@ const ProfessorDashboard: React.FC = () => {
     try {
       setUploadingFiles(true);
       await professorAPI.uploadMaterials(files, currentFolderId);
-      showToast(`${files.length} file(s) uploaded successfully`, 'success');
+      showToast(`${files.length} attachment(s) accepted. Indexing will run in the background.`, 'success');
       loadMaterials();
       e.target.value = '';
     } catch (error: any) {
@@ -237,6 +239,17 @@ const ProfessorDashboard: React.FC = () => {
     } catch (error: any) {
       showToast(error.response?.data?.error || 'Failed to download material', 'error');
     }
+  };
+
+  const handleReindexMaterial = async (id: number) => {
+    try {
+      setRetryingMaterialId(id);
+      await professorAPI.reindexMaterial(id);
+      showToast('Attachment queued for indexing. Refresh to check its status.', 'success');
+      await loadMaterials();
+    } catch (error: any) {
+      showToast(error.response?.data?.error || 'Could not queue attachment for indexing', 'error');
+    } finally { setRetryingMaterialId(null); }
   };
 
   const formatFileSize = (bytes: number) => {
@@ -362,6 +375,7 @@ const ProfessorDashboard: React.FC = () => {
             <div className="section-header">
               <h2>Course Materials</h2>
               <div className="materials-actions-bar">
+                <button type="button" className="btn-secondary" onClick={loadMaterials} disabled={loading}>Refresh status</button>
                 <button
                   className="btn-secondary"
                   onClick={() => setShowCreateFolder(true)}
@@ -381,6 +395,8 @@ const ProfessorDashboard: React.FC = () => {
                 </label>
               </div>
             </div>
+
+            <p className="material-index-help">Attachments become available for course answers after indexing finishes. Scanned PDFs and images need a readable text version while text recognition is unavailable.</p>
 
             {/* Breadcrumb Navigation */}
             <div className="folder-breadcrumb">
@@ -489,8 +505,14 @@ const ProfessorDashboard: React.FC = () => {
                         {formatFileSize(material.file_size)} &bull;
                         Uploaded {new Date(material.uploaded_at).toLocaleDateString()}
                       </p>
+                      <MaterialIndexStatus material={material} showError />
                     </div>
                     <div className="material-actions">
+                      {['unindexed', 'failed', 'needs_review'].includes(material.ingestion_status || 'unindexed') && (
+                        <button type="button" className="btn-secondary" onClick={() => handleReindexMaterial(material.id)} disabled={retryingMaterialId !== null}>
+                          {retryingMaterialId === material.id ? 'Queuing...' : 'Retry indexing'}
+                        </button>
+                      )}
                       <button
                         className="btn-secondary"
                         onClick={() => handleDownloadMaterial(material.id)}

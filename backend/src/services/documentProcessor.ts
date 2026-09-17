@@ -1,11 +1,15 @@
-const pdfParse = require('pdf-parse');
 import mammoth from 'mammoth';
 import { OfficeParser } from 'officeparser';
 import * as XLSX from 'xlsx';
 import * as CFB from 'cfb';
-import { Groq } from 'groq-sdk';
 import { DOCUMENT_PROCESSING, OCR_CONFIG } from '../config/constants';
-import { ocrDocument } from './ocrClient';
+import { MATERIAL_INGESTION } from '../config/materialIngestion';
+const PDF_JS = require('pdf-parse/lib/pdf.js/v1.10.100/build/pdf.js');
+// Use pdf-parse's bundled PDF.js with explicit Node settings. The wrapper does
+// not forward native image-decoder settings to getDocument.
+PDF_JS.PDFJS.disableFontFace = true;
+PDF_JS.PDFJS.isEvalSupported = false;
+const PDF_OPS = PDF_JS.OPS;
 
 /**
  * Interface for processed document chunks
@@ -18,6 +22,8 @@ export interface DocumentChunk {
     start_char?: number;
     end_char?: number;
     chunk_index: number;
+    section?: string;
+    locator_kind?: string;
   };
 }
 
@@ -33,6 +39,9 @@ export interface ProcessedDocument {
     extraction_method: 'pdf-parse' | 'mammoth' | 'text' | 'officeparser-pptx' | 'xlsx'
       | 'gemini-ocr' | 'unlimited-ocr' | 'groq-vision' | 'unsupported';
     extraction_degraded?: boolean;
+    text_coverage?: 'complete' | 'partial';
+    review_pages?: number[];
+    pages?: Array<{ text: string; locator: {page?: number; section?: string; kind?: string} }>;
     extraction_date: string;
     error?: string;
   };
@@ -44,58 +53,49 @@ export interface ProcessedDocument {
 async function extractFromPDF(fileBuffer: Buffer): Promise<ProcessedDocument> {
   // Pass 1: text layer, collected per page so chunks get real page numbers.
   let pageTexts: string[] = [];
+  const suspectPages = new Set<number>();
   let textLayerError: string | undefined;
+  let loadingTask: any;
   try {
     const collected: string[] = [];
-    await pdfParse(fileBuffer, {
-      pagerender: async (pageData: any) => {
+    loadingTask = PDF_JS.getDocument({ data: new Uint8Array(fileBuffer),
+      nativeImageDecoderSupport: PDF_JS.NativeImageDecoding.NONE });
+    const pdf = await loadingTask.promise;
+    const pageCount = Math.min(pdf.numPages, MATERIAL_INGESTION.maxPages);
+    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
         let text = '';
         try {
+          const pageData = await pdf.getPage(pageNumber);
           const tc = await pageData.getTextContent();
           // Preserve line breaks (hasEOL) so chunking sees structure, not one blob.
           text = tc.items.map((it: any) => it.str + (it.hasEOL ? '\n' : ' ')).join('').trim();
+          const operators = await pageData.getOperatorList();
+          const hasImage = operators.fnArray.some((op: number) => [PDF_OPS.paintJpegXObject, PDF_OPS.paintImageXObject,
+            PDF_OPS.paintInlineImageXObject, PDF_OPS.paintInlineImageXObjectGroup,
+            PDF_OPS.paintImageXObjectRepeat, PDF_OPS.paintImageMaskXObjectRepeat].includes(op));
+          if (hasImage && text.split(/\s+/).filter(Boolean).length < OCR_CONFIG.MIN_WORDS_PER_PAGE) {
+            suspectPages.add(pageNumber);
+          }
         } catch {
           // A single page's failure must NOT drop it from `collected` — that would
           // misalign every later page number. Keep a placeholder to preserve order.
           text = '';
         }
-        collected.push(text);
-        return text;
-      },
-    });
+        collected[pageNumber - 1] = text;
+    }
     pageTexts = collected;
+    if (pdf.numPages > MATERIAL_INGESTION.maxPages) textLayerError = 'PDF exceeds the native page limit';
   } catch (error) {
     textLayerError = error instanceof Error ? error.message : 'Unknown error';
+  } finally {
+    if (loadingTask) await loadingTask.destroy().catch(() => { /* Already closed after a parser failure. */ });
   }
 
-  const scanned = needsOcr(pageTexts);
-
-  // Pass 2: scanned or unreadable PDFs go to the OCR sidecar.
-  if (scanned && OCR_CONFIG.ENABLED) {
-    try {
-      const ocrPages = await ocrDocument(fileBuffer, 'application/pdf');
-      const pages = ocrPages.map(p => ({ page_number: p.page_number, text: p.markdown }));
-      const content_text = pages.map(p => p.text).join('\n\n');
-      if (content_text.trim().length === 0) {
-        // Non-empty pages array but all blank markdown — treat as failure so we fall
-        // through to the degraded text-layer branch (which flags extraction_degraded).
-        throw new Error('OCR sidecar returned only blank pages');
-      }
-      return {
-        content_text,
-        content_chunks: chunkPages(pages),
-        metadata: {
-          page_count: pages.length,
-          word_count: content_text.split(/\s+/).filter(w => w.length > 0).length,
-          extraction_method: 'unlimited-ocr',
-          extraction_date: new Date().toISOString(),
-        },
-      };
-    } catch (ocrError) {
-      console.error('OCR sidecar failed, falling back to text layer:', ocrError);
-      // fall through to degraded text-layer result below
-    }
-  }
+  // OCR is intentionally deferred: never call the sidecar or a vision model.
+  // A short title page alone does not imply a scanned document. A blank/error
+  // page requires review because native extraction cannot establish completeness.
+  const reviewPages = pageTexts.map((text, i) => text.trim() && !suspectPages.has(i + 1) ? 0 : i + 1).filter(Boolean);
+  const scanned = pageTexts.length === 0 || reviewPages.length > 0 || Boolean(textLayerError);
 
   const content_text = pageTexts.join('\n\n');
   const pages = pageTexts.map((text, i) => ({ page_number: i + 1, text }));
@@ -104,6 +104,9 @@ async function extractFromPDF(fileBuffer: Buffer): Promise<ProcessedDocument> {
     content_chunks: chunkPages(pages),
     metadata: {
       page_count: pageTexts.length,
+      review_pages: reviewPages,
+      text_coverage: scanned ? 'partial' : 'complete',
+      pages: pageTexts.map((text, i) => ({text, locator: {page: i + 1, kind: 'pdf_page'}})),
       word_count: content_text.split(/\s+/).filter(w => w.length > 0).length,
       extraction_method: 'pdf-parse',
       extraction_date: new Date().toISOString(),
@@ -351,35 +354,25 @@ async function extractFromExcel(fileBuffer: Buffer): Promise<ProcessedDocument> 
     }
 
     const textParts: string[] = [];
-
+    const sheetChunks: DocumentChunk[] = [];
     for (const sheetName of workbook.SheetNames) {
       const worksheet = workbook.Sheets[sheetName];
-      if (!worksheet) continue;
-
-      const rows: any[][] = XLSX.utils.sheet_to_json(worksheet, {
-        header: 1,
-        defval: '',
-        blankrows: false
-      });
-
-      if (rows.length === 0) continue;
-
-      textParts.push(`\n--- Sheet: ${sheetName} ---\n`);
-
-      // First row as headers
-      if (rows.length > 0) {
-        const headers = rows[0].map((cell: any) => String(cell || '').trim());
-        textParts.push(`Headers: ${headers.join(' | ')}`);
-      }
-
-      // Data rows
-      for (let i = 1; i < rows.length; i++) {
-        const rowValues = rows[i]
-          .map((cell: any) => String(cell || '').trim())
-          .filter((val: string) => val.length > 0);
-
-        if (rowValues.length > 0) {
-          textParts.push(`Row ${i}: ${rowValues.join(' | ')}`);
+      if (!worksheet?.['!ref']) continue;
+      const range = XLSX.utils.decode_range(worksheet['!ref']);
+      for (let row = range.s.r; row <= range.e.r; row++) {
+        const cells: string[] = [];
+        for (let col = range.s.c; col <= range.e.c; col++) {
+          const address = XLSX.utils.encode_cell({r: row, c: col});
+          const cell = worksheet[address];
+          if (cell && cell.v !== undefined && cell.v !== null) cells.push(`${address}: ${XLSX.utils.format_cell(cell)}`);
+        }
+        if (!cells.length) continue;
+        const text = cells.join(' | ');
+        textParts.push(`${sheetName}, row ${row + 1}: ${text}`);
+        for (const chunk of chunkTextSemantic(text)) {
+          const index = sheetChunks.length;
+          sheetChunks.push({...chunk, chunk_id: `chunk_${index}`, metadata: {...chunk.metadata,
+            chunk_index: index, section: `${sheetName}, row ${row + 1}`, locator_kind: 'sheet_row'}});
         }
       }
     }
@@ -400,13 +393,13 @@ async function extractFromExcel(fileBuffer: Buffer): Promise<ProcessedDocument> 
 
     const word_count = content_text.split(/\s+/).filter((w: string) => w.length > 0).length;
     const page_count = workbook.SheetNames.length;
-    const chunks = chunkTextSemantic(content_text);
+    const chunks = sheetChunks;
 
     return {
       content_text,
       content_chunks: chunks,
       metadata: {
-        page_count,
+
         word_count,
         extraction_method: 'xlsx',
         extraction_date: new Date().toISOString()
@@ -426,105 +419,12 @@ async function extractFromExcel(fileBuffer: Buffer): Promise<ProcessedDocument> 
   }
 }
 
-/**
- * Extract text from an image: OCR sidecar first, Groq vision model as fallback.
- */
-async function extractFromImage(fileBuffer: Buffer, mimeType: string): Promise<ProcessedDocument> {
-  // Preferred path: local OCR sidecar.
-  if (OCR_CONFIG.ENABLED) {
-    try {
-      const ocrPages = await ocrDocument(fileBuffer, mimeType);
-      const content_text = ocrPages.map(p => p.markdown).join('\n\n').trim();
-      if (content_text.length > 0) {
-        return {
-          content_text,
-          content_chunks: chunkPages(ocrPages.map(p => ({ page_number: p.page_number, text: p.markdown }))),
-          metadata: {
-            word_count: content_text.split(/\s+/).filter(w => w.length > 0).length,
-            extraction_method: 'unlimited-ocr',
-            extraction_date: new Date().toISOString(),
-          },
-        };
-      }
-    } catch (error) {
-      console.error('OCR sidecar failed for image, falling back to Groq vision:', error);
-    }
-  }
-
-  // Fallback: Groq vision model.
-  try {
-    const apiKey = process.env.GROQ_API_KEY || process.env.AI_API_KEY;
-    if (!apiKey) {
-      throw new Error('GROQ_API_KEY environment variable is not set');
-    }
-
-    const base64Data = fileBuffer.toString('base64');
-    const groq = new Groq({ apiKey });
-
-    const result = await groq.chat.completions.create({
-      model: OCR_CONFIG.GROQ_VISION_FALLBACK_MODEL,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'text',
-              text: `Extract ALL text visible in this image. Include:
-- All printed or typed text
-- All handwritten text (if any)
-- Text in tables, charts, or diagrams
-- Labels, captions, headers, and footers
-
-Return ONLY the extracted text, preserving the original structure and formatting as much as possible.
-If the image contains a table, format it with pipe (|) delimiters.
-If there is no readable text in the image, respond with exactly: "NO_TEXT_FOUND"`
-            },
-            {
-              type: 'image_url',
-              image_url: { url: `data:${mimeType};base64,${base64Data}` }
-            }
-          ]
-        }
-      ]
-    });
-
-    const content_text = result.choices[0]?.message?.content?.trim() || '';
-
-    if (content_text === 'NO_TEXT_FOUND' || content_text.length === 0) {
-      return {
-        content_text: '',
-        content_chunks: [],
-        metadata: {
-          extraction_method: 'groq-vision',
-          extraction_date: new Date().toISOString(),
-          error: 'Image contained no extractable text'
-        }
-      };
-    }
-
-    return {
-      content_text,
-      content_chunks: chunkTextSemantic(content_text),
-      metadata: {
-        word_count: content_text.split(/\s+/).filter(w => w.length > 0).length,
-        extraction_method: 'groq-vision',
-        extraction_date: new Date().toISOString(),
-        extraction_degraded: OCR_CONFIG.ENABLED ? true : undefined,
-      }
-    };
-  } catch (error) {
-    console.error('Error extracting text from image:', error);
-    return {
-      content_text: '',
-      content_chunks: [],
-      metadata: {
-        extraction_method: 'groq-vision',
-        extraction_date: new Date().toISOString(),
-        extraction_degraded: true,
-        error: `Image OCR extraction failed: ${error instanceof Error ? error.message : 'Unknown error'}`
-      }
-    };
-  }
+/** Image extraction is deferred until OCR is explicitly implemented. */
+async function extractFromImage(_fileBuffer: Buffer, _mimeType: string): Promise<ProcessedDocument> {
+  return {content_text: '', content_chunks: [], metadata: {
+    extraction_method: 'unsupported', extraction_degraded: true,
+    extraction_date: new Date().toISOString(), error: 'Image-only materials require review; OCR is disabled',
+  }};
 }
 
 /** A PDF whose text layer averages fewer words/page than the threshold is treated as scanned. */
@@ -560,85 +460,21 @@ export function chunkPages(pages: Array<{ page_number: number; text: string }>):
  * @returns Array of document chunks
  */
 function chunkTextSemantic(text: string): DocumentChunk[] {
-  const targetWords = DOCUMENT_PROCESSING.CHUNK_SIZE_WORDS;
-  const overlapWords = DOCUMENT_PROCESSING.CHUNK_OVERLAP_WORDS;
-
-  // Split into paragraphs first (preserve natural document structure)
-  const rawParagraphs = text.split(/\n\s*\n/).filter(p => p.trim().length > 0);
-  // Break any single paragraph longer than the target into word-sized sub-blocks,
-  // so a newline-free page (e.g. a PDF page rendered as one blob) can't collapse
-  // into a single oversized chunk.
-  const paragraphs: string[] = [];
-  for (const p of rawParagraphs) {
-    const words = p.split(/\s+/).filter(w => w.length > 0);
-    if (words.length <= targetWords) {
-      paragraphs.push(p);
-    } else {
-      for (let i = 0; i < words.length; i += targetWords) {
-        paragraphs.push(words.slice(i, i + targetWords).join(' '));
-      }
-    }
-  }
-
+  // Slice the original extraction rather than reconstructing words: evidence
+  // excerpts and offsets remain exact even with repeated spaces/newlines.
+  const words = [...text.matchAll(/\S+/g)];
+  const target = DOCUMENT_PROCESSING.CHUNK_SIZE_WORDS;
+  const overlap = Math.min(DOCUMENT_PROCESSING.CHUNK_OVERLAP_WORDS, target - 1);
   const chunks: DocumentChunk[] = [];
-  let currentChunk = '';
-  let chunkIndex = 0;
-  let charOffset = 0;
-
-  for (const paragraph of paragraphs) {
-    const paragraphWords = paragraph.split(/\s+/).filter(w => w.length > 0);
-    const currentWords = currentChunk.split(/\s+/).filter(w => w.length > 0);
-
-    // If adding this paragraph exceeds target, save current chunk
-    if (currentWords.length > 0 && currentWords.length + paragraphWords.length > targetWords) {
-      chunks.push({
-        chunk_id: `chunk_${chunkIndex}`,
-        text: currentChunk.trim(),
-        metadata: {
-          start_char: charOffset,
-          end_char: charOffset + currentChunk.length,
-          chunk_index: chunkIndex
-        }
-      });
-
-      chunkIndex++;
-      charOffset += currentChunk.length;
-
-      // Keep overlap from previous chunk (last N words)
-      const overlapText = currentWords.slice(-overlapWords).join(' ');
-      currentChunk = overlapText + '\n\n' + paragraph;
-    } else {
-      // Add paragraph to current chunk
-      currentChunk += (currentChunk ? '\n\n' : '') + paragraph;
-    }
+  for (let first = 0; first < words.length; first += target - overlap) {
+    const last = Math.min(first + target, words.length) - 1;
+    const start = words[first].index!;
+    const end = words[last].index! + words[last][0].length;
+    const index = chunks.length;
+    chunks.push({ chunk_id: `chunk_${index}`, text: text.slice(start, end),
+      metadata: {start_char: start, end_char: end, chunk_index: index, locator_kind: 'extracted_text'} });
+    if (last === words.length - 1) break;
   }
-
-  // Add final chunk
-  if (currentChunk.trim().length > 0) {
-    chunks.push({
-      chunk_id: `chunk_${chunkIndex}`,
-      text: currentChunk.trim(),
-      metadata: {
-        start_char: charOffset,
-        end_char: charOffset + currentChunk.length,
-        chunk_index: chunkIndex
-      }
-    });
-  }
-
-  // Ensure at least one chunk exists
-  if (chunks.length === 0 && text.trim().length > 0) {
-    chunks.push({
-      chunk_id: 'chunk_0',
-      text: text.trim(),
-      metadata: {
-        start_char: 0,
-        end_char: text.length,
-        chunk_index: 0
-      }
-    });
-  }
-
   return chunks;
 }
 

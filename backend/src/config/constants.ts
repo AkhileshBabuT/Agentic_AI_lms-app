@@ -41,8 +41,8 @@ export const DOCUMENT_PROCESSING = {
 // OCR SIDECAR CONFIGURATION (Unlimited-OCR)
 // =====================================================
 export const OCR_CONFIG = {
-  /** OCR is used only when a sidecar URL is configured (and not force-disabled) */
-  ENABLED: !!process.env.OCR_SIDECAR_URL && process.env.OCR_ENABLED !== 'false',
+  /** OCR deferred for the production RAG pilot; retained configuration is dormant. */
+  ENABLED: false,
 
   /** Base URL of the FastAPI OCR sidecar */
   SIDECAR_URL: process.env.OCR_SIDECAR_URL || 'http://localhost:8100',
@@ -90,6 +90,11 @@ export const EMBEDDING_CONFIG = {
   /** Local transformers.js embedding model (a change requires a full reindex — see reindexEmbeddings.ts) */
   MODEL_ID: process.env.EMBEDDING_MODEL_ID || 'Xenova/bge-base-en-v1.5',
 
+  /** Pin weights/tokenizer together; a custom model requires its own immutable revision. */
+  MODEL_REVISION: process.env.EMBEDDING_MODEL_REVISION ||
+    ((!process.env.EMBEDDING_MODEL_ID || process.env.EMBEDDING_MODEL_ID === 'Xenova/bge-base-en-v1.5')
+      ? '4d6cd88e18e51a5e020c2c305726d76ada9c03cf' : 'main'),
+
   /** Asymmetric query prefix. bge-base-en-v1.5 requires it; bge-m3 uses '' (set via env on migration). */
   QUERY_PREFIX: process.env.EMBEDDING_QUERY_PREFIX
     ?? 'Represent this sentence for searching relevant passages: ',
@@ -115,6 +120,9 @@ export const RERANKER_CONFIG = {
 
   /** Local transformers.js cross-encoder (ponytail: base model; set RERANKER_MODEL_ID to a v2-m3 ONNX build when available) */
   MODEL_ID: process.env.RERANKER_MODEL_ID || 'Xenova/bge-reranker-base',
+  MODEL_REVISION: process.env.RERANKER_MODEL_REVISION ||
+    ((!process.env.RERANKER_MODEL_ID || process.env.RERANKER_MODEL_ID === 'Xenova/bge-reranker-base')
+      ? '280bcc27a84e0b898c251e06fddb25171bd9b101' : 'main'),
 
   /** Truncate each document to this many chars before scoring (cross-encoders are O(pair)) */
   MAX_DOC_CHARS: 2000,

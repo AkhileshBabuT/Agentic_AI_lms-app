@@ -1,4 +1,5 @@
 import axios from 'axios';
+import type { AnswerReferences, SourceAccess } from '../types/rag';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api';
 
@@ -149,6 +150,9 @@ export const professorAPI = {
 
   deleteMaterial: (materialId: number) =>
     apiClient.delete(`/professor/materials/${materialId}`),
+
+  reindexMaterial: (materialId: number) =>
+    apiClient.post(`/professor/materials/${materialId}/reindex`),
 
   downloadMaterial: (materialId: number) =>
     apiClient.get(`/professor/materials/${materialId}/download`),
@@ -313,17 +317,20 @@ export const chatAPI = {
   deleteGeneratedContent: (contentId: number) =>
     apiClient.delete(`/chat/generated-content/${contentId}`),
 
-  // Get trust score for a message
-  getTrustScore: (messageId: number) =>
-    apiClient.get(`/chat/messages/${messageId}/trust-score`),
-
   // Get sources for a message
   getSources: (messageId: number) =>
     apiClient.get(`/chat/messages/${messageId}/sources`),
 
-  // Get fact-check result for a message (Groq independent verification)
-  getFactCheck: (messageId: number) =>
-    apiClient.get(`/chat/messages/${messageId}/fact-check`),
+};
+
+/** Fresh authorization checks: never resolve documents using historical metadata URLs. */
+export const materialSourcesAPI = {
+  getSavedContent: (contentId: number, signal?: AbortSignal) =>
+    apiClient.get<AnswerReferences>(`/material-sources/saved/${contentId}`, { signal }),
+  getAnswer: (messageId: number, signal?: AbortSignal) =>
+    apiClient.get<AnswerReferences>(`/material-sources/answers/${messageId}`, { signal }),
+  resolve: (chunkId: string, signal?: AbortSignal) =>
+    apiClient.get<SourceAccess>(`/material-sources/${encodeURIComponent(chunkId)}`, { signal }),
 };
 
 // Grading Assistant API

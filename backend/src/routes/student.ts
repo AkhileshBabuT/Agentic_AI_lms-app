@@ -402,7 +402,7 @@ router.get('/courses/:courseId/materials', async (req, res) => {
         SELECT cm.*, u.full_name as uploader_name
         FROM course_materials cm
         JOIN users u ON cm.uploaded_by = u.id
-        WHERE cm.course_id = $1
+        WHERE cm.course_id = $1 AND cm.deleted_at IS NULL AND cm.visibility = 'published'
         ORDER BY cm.uploaded_at DESC
       `;
       params = [courseId];
@@ -412,7 +412,7 @@ router.get('/courses/:courseId/materials', async (req, res) => {
         SELECT cm.*, u.full_name as uploader_name
         FROM course_materials cm
         JOIN users u ON cm.uploaded_by = u.id
-        WHERE cm.course_id = $1 AND cm.folder_id IS NULL
+        WHERE cm.course_id = $1 AND cm.deleted_at IS NULL AND cm.visibility = 'published' AND cm.folder_id IS NULL
         ORDER BY cm.uploaded_at DESC
       `;
       params = [courseId];
@@ -422,7 +422,7 @@ router.get('/courses/:courseId/materials', async (req, res) => {
         SELECT cm.*, u.full_name as uploader_name
         FROM course_materials cm
         JOIN users u ON cm.uploaded_by = u.id
-        WHERE cm.course_id = $1 AND cm.folder_id = $2
+        WHERE cm.course_id = $1 AND cm.deleted_at IS NULL AND cm.visibility = 'published' AND cm.folder_id = $2
         ORDER BY cm.uploaded_at DESC
       `;
       params = [courseId, folderId];
@@ -449,7 +449,7 @@ router.get('/materials/:id/download', async (req, res) => {
     const result = await pool.query(
       `SELECT cm.* FROM course_materials cm
        JOIN enrollments e ON cm.course_id = e.course_id
-       WHERE cm.id = $1 AND e.user_id = $2`,
+       WHERE cm.id = $1 AND e.user_id = $2 AND cm.deleted_at IS NULL AND cm.visibility = 'published'`,
       [id, req.user!.userId]
     );
 

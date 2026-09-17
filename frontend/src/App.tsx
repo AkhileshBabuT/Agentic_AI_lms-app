@@ -10,6 +10,7 @@ import ProfessorAssignmentDetail from './pages/ProfessorAssignmentDetail';
 import AIAgentHub from './pages/AIAgentHub';
 import ChatInterface from './pages/ChatInterface';
 import AgentContentViewer from './pages/AgentContentViewer';
+import MaterialSourceViewer from './pages/MaterialSourceViewer';
 import ProtectedRoute from './components/ProtectedRoute';
 import RoleBasedDashboard from './components/RoleBasedDashboard';
 import './App.css';
@@ -87,6 +88,7 @@ function App() {
                   </ProtectedRoute>
                 }
               />
+              <Route path="/material-source/:chunkId" element={<ProtectedRoute><MaterialSourceViewer /></ProtectedRoute>} />
               <Route path="/" element={<Navigate to="/dashboard" replace />} />
             </Routes>
           </div>

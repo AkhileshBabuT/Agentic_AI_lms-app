@@ -54,6 +54,12 @@ export async function runMigrations(): Promise<void> {
     await client.query(appSettingsMigrationSQL);
     console.log('✓ App Settings schema migration completed successfully');
 
+    // Migration 8: durable versioned course-material ingestion (no backfill at boot).
+    await client.query(fs.readFileSync(path.join(__dirname, 'material-ingestion-schema.sql'), 'utf8'));
+
+    // Migration 9: immutable evidence and assistant-owned course-answer citations.
+    await client.query(fs.readFileSync(path.join(__dirname, 'rag-answers-schema.sql'), 'utf8'));
+
   } catch (error) {
     console.error('Error running migrations:', error);
     throw error;

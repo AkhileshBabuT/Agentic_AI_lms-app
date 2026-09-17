@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../components/Toast';
 import { studentAPI } from '../services/api';
+import MaterialIndexStatus from '../components/MaterialIndexStatus';
 import './CoursePage.css';
 
 const CoursePage: React.FC = () => {
@@ -200,6 +201,7 @@ const CoursePage: React.FC = () => {
         return (
           <div className="materials-content">
             <h2>Course Materials</h2>
+            <button type="button" className="btn-secondary" onClick={loadMaterials} disabled={loading}>Refresh status</button>
 
             {/* Breadcrumb Navigation */}
             <div className="folder-breadcrumb">
@@ -260,6 +262,7 @@ const CoursePage: React.FC = () => {
                         {formatFileSize(material.file_size)} &bull;
                         Uploaded {new Date(material.uploaded_at).toLocaleDateString()}
                       </p>
+                      <MaterialIndexStatus material={material} />
                     </div>
                     <div className="material-actions">
                       <button

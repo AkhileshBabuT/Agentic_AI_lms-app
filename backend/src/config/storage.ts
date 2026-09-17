@@ -95,13 +95,15 @@ export const deleteFile = async (filePath: string): Promise<void> => {
  */
 export const generateSignedUrl = async (
   filePath: string,
-  expiresIn: number = 60
+  expiresIn: number = 60,
+  generation?: string
 ): Promise<string> => {
   try {
     const [url] = await bucket.file(filePath).getSignedUrl({
       version: 'v4',
       action: 'read',
       expires: Date.now() + expiresIn * 60 * 1000, // Convert minutes to milliseconds
+      ...(generation ? { queryParams: { generation } } : {}),
     });
 
     return url;
@@ -174,3 +176,24 @@ export const initializeBucket = async (): Promise<void> => {
 };
 
 export { storage, bucket, bucketName };
+
+/** Create-only paths and generation-bound reads keep cited attachments immutable. */
+export async function uploadImmutableFile(buffer: Buffer, objectName: string, mimeType: string, sha256: string): Promise<string> {
+  const object = bucket.file(objectName);
+  await object.save(buffer, {
+    resumable: false, validation: 'crc32c', preconditionOpts: { ifGenerationMatch: 0 },
+    metadata: { contentType: mimeType, metadata: { sha256 } },
+  });
+  const [metadata] = await object.getMetadata();
+  if (!metadata.generation) throw new Error('Storage did not return an immutable object generation');
+  return String(metadata.generation);
+}
+
+export async function downloadImmutableFile(objectName: string, generation: string, maxBytes: number): Promise<Buffer> {
+  const object = bucket.file(objectName, { generation });
+  const [metadata] = await object.getMetadata();
+  if (Number(metadata.size) > maxBytes) throw new Error('Material exceeds the ingestion byte limit');
+  const [buffer] = await object.download();
+  if (buffer.length > maxBytes) throw new Error('Material exceeds the ingestion byte limit');
+  return buffer;
+}

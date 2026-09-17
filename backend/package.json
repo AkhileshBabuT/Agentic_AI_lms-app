@@ -8,7 +8,9 @@
     "build": "tsc && npm run copy-files",
     "copy-files": "node -e \"const fs=require('fs');const path=require('path');[{src:'src/db/migrations',dest:'dist/db/migrations'},{src:'migrations',dest:'dist/migrations'}].forEach(({src,dest})=>{if(fs.existsSync(src)){fs.mkdirSync(dest,{recursive:true});fs.readdirSync(src).forEach(file=>{if(file.endsWith('.sql')){fs.copyFileSync(path.join(src,file),path.join(dest,file));console.log('Copied:',file);}});}});\"",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "rag:worker": "ts-node src/scripts/materialIngestionWorker.ts",
+    "rag:backfill": "ts-node src/scripts/backfillMaterialIndex.ts"
   },
   "keywords": [],
   "author": "",

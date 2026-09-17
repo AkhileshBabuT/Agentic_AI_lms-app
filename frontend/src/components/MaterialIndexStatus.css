@@ -1,0 +1,7 @@
+.material-index-status { font-size: 12px; margin-top: 8px; color: #64748b; }
+.material-index-label { display: inline-block; font-weight: 600; border-radius: 4px; background: #f1f5f9; color: #475569; padding: 3px 7px; }
+.material-index-status p { margin: 5px 0 0; max-width: 620px; }
+.material-index-ready .material-index-label { background: #dcfce7; color: #166534; }
+.material-index-needs_review .material-index-label { background: #fef3c7; color: #92400e; }
+.material-index-failed .material-index-label, .material-index-upload_failed .material-index-label { background: #fee2e2; color: #991b1b; }
+.material-index-error { color: #991b1b; overflow-wrap: anywhere; }

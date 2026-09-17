@@ -1,41 +1,54 @@
 # Agentic AI LMS — Project Knowledge
 
-Durable architecture and conventions for this repo. (Not a changelog — no task/PR history here.)
+Durable architecture and conventions for this repository.
 
-## Stack & layout
+## Stack and layout
 
-- **backend/** — Node/Express + TypeScript, PostgreSQL with the **pgvector** extension. Tests: **vitest** (`npm test` = `vitest run`) from `backend/`. Typecheck: `npx tsc --noEmit`.
-- **frontend/** — React + TypeScript + Vite. Build/typecheck: `npm run build` (`tsc -b && vite build`). No unit-test suite; the build is the gate.
-- **ocr-sidecar/** — standalone Python FastAPI service wrapping a local vLLM server for OCR. Not part of the Node build; runs as a separate process (needs a CUDA GPU). The backend calls it over HTTP at `OCR_SIDECAR_URL`.
-- **docs/** — specs and implementation plans.
+- `backend/`: Express/TypeScript, PostgreSQL/pgvector. `npm test` runs Vitest; `npx tsc --noEmit` checks types; `npm run build` copies SQL migrations into the compiled output.
+- `frontend/`: React/TypeScript/Vite. `npm run build` is the production build/typecheck gate.
+- `ocr-sidecar/`: retained Python service; dormant. No active native-ingestion or image-extraction path calls OCR or a vision fallback. `OCR_CONFIG.ENABLED` is hard-disabled for the current scope.
+- `docs/production-rag.md`: configuration, worker/backfill, lifecycle, validation and rollout instructions.
 
-## Core domain
+## Domain and authorization
 
-An LMS where professors upload course materials and students chat with an AI tutor grounded in those materials (RAG). Roles: `student`, `professor`, `root` (admin). Auth is JWT (`middleware/auth.ts`): `authenticate` sets `req.user`, `authorize(...roles)` gates by role. The `root` router (`routes/root.ts`) applies `authorize('root')` globally.
+Professors upload course materials; enrolled students use a tutor grounded in authorized published materials. Roles are student, professor and root. JWT middleware reads current account role/status from PostgreSQL. `services/rag/access.ts` rechecks account, course membership and owner access; this policy also filters both retrieval branches and source resolution.
 
-## Ingestion → retrieval → answer pipeline
+Student submissions and private grading rubrics are outside the course-material retrieval corpus. Assignment grading/review retains its existing Gemini/Groq provider factory and numerical grades.
 
-1. **Extraction** (`services/documentProcessor.ts`): `extractTextFromFile(buffer, name, mime)` dispatches by MIME to per-format extractors and returns `{ content_text, content_chunks, metadata }`. Scanned PDFs / images route to the OCR sidecar (`services/ocrClient.ts`); PDFs with a healthy text layer use `pdf-parse`. Chunking is **per-page** (`chunkPages` → `chunkTextSemantic`) so chunk metadata carries real page numbers. `metadata.extraction_degraded = true` marks a doc whose extraction is known-bad (sidecar down on a scanned doc, etc.).
-2. **Embedding** (`services/embeddingService.ts`): local transformers.js model via `@xenova/transformers`, config-driven through `EMBEDDING_CONFIG` (model id, dimension, query prefix — all env-overridable). Queries use `embedQuery` (applies the asymmetric prefix); documents are embedded raw. A dimension guard throws if model output length ≠ configured dimension. Vectors stored in pgvector.
-3. **Retrieval** (`services/vectorSearch.ts`): pgvector cosine search (`searchCourseMaterials`), then an optional **cross-encoder reranker** (`services/rerankerService.ts`) re-scores the recall set. The reranker **fails open** — any load/scoring error degrades to vector order.
-4. **Answer** (`services/agents/SubjectChatbotAgent.ts`): builds a grounded prompt from the reranked chunks. Distinguish `relevantMaterials` (full recall set — used for the web-search decision and stats) from the reranked subset used for the prompt/sources.
+## Ingestion and immutable publication
 
-## Source-of-truth mode (strict vs external)
+`services/materials/` owns durable upload intents, versioned GCS attachments, leased jobs, native extraction validation, tokenizer-bounded chunks, retry and atomic publication. `services/documentProcessor.ts` preserves PDF physical pages and honest extracted-text/section locators for other formats. Empty, unsupported or fatal extraction becomes needs_review. Mixed PDFs with usable native text publish that text with explicit partial coverage, affected pages and an ingestion_warning; source APIs derive warnings from immutable run metadata. Sparse cover/diagram pages must not block all usable text. Current pipeline: native-v2-partial-text; pipeline mismatches are rejected and retries enqueue new runs.
 
-- One global setting in `app_settings` (single locked row), read via `services/settingsService.ts` `getSourceOfTruthMode()` — **fail-closed**: any DB error, missing row, or invalid value returns `'strict'`. 60s cache; `setSourceOfTruthMode` writes an `app_settings_audit` row and busts the cache. Managed via root API (`/api/root/settings/source-of-truth`) and a toggle on the root dashboard.
-- **Strict** = course materials only: web search is skipped in the chatbot, and the fact-checker (`services/factcheck/GroqFactCheckService.ts`) uses `SYSTEM_PROMPT_STRICT` so uncovered claims are `unverifiable` (never verified from model knowledge). **External** = today's behavior (web grounding + own-knowledge fallback allowed). Each answer records the mode it was produced under in `message_metadata.sourceOfTruthMode`.
+PDF extraction uses pdf-parse's bundled PDF.js directly with browser font loading disabled and a non-browser image decoder. Operator-list inspection must not invoke DOM font/JPEG loaders in Node. Keep the embedded-font/JPEG subprocess regression fixtures. Native validation errors return safe HTTP 400 reasons; unexpected upload failures log only stage and validated database codes.
 
-## Trust / Validation / Fact-check scoring
+New uploads return accepted indexing state after storage/queue finalization; extraction and embeddings run in a separate process. Worker entry: `scripts/materialIngestionWorker.ts`. Backfill entry: `scripts/backfillMaterialIndex.ts` with dry-run, course/limit/cursor and resume options. Do not backfill at application boot or silently request professors to upload available originals again.
 
-Three independent signals surfaced per answer (see `TRUST_SCORE_LOGIC.md`, `services/scoring/`, frontend `MessageMetadata.tsx` + `ScoreExplainer.tsx`): **Trust** (two-model Groq jury, `juryReconciliation.ts`), **Validation** (response↔docs cosine faithfulness, `validationScore.ts` + `cosineCalibration.ts`), **Fact-check** (independent Groq accuracy). Flags: `verifiers_disagree`, `low_validation_warning`.
+`course_materials.published_run_id` selects a complete immutable run. Candidate failures retain the old pointer. Jobs use heartbeat, fencing and bounded retries. Native ingestion limits and supported signatures live in `config/materialIngestion.ts` and `services/materials/fileValidation.ts`. GCS originals use private immutable object paths and generation-aware reads; storage and PostgreSQL are separate operations reconciled through intents.
 
-## AI providers
+Local embeddings stay 768-dimensional BGE, mean pooled, normalized, with the query prefix. Weights/tokenizer are commit-pinned; `getEmbeddingSpaceId()` fingerprints the representation. A changed model, revision, tokenizer, pooling or prefix needs a separate index/backfill. Dimension changes need explicit schema migration. The legacy reindexEmbeddings script only fills missing legacy embeddings and does not implement --all; use the new backfill for provenance/publication.
 
-`services/ai/AIServiceFactory.ts` selects a provider (`providers/GeminiAIService.ts`, `GroqAIService.ts`, `MockAIService.ts`). Groq is shared across fact-check, the trust jury, the emotional filter, and image-OCR fallback — mind the shared rate limit (`GroqRateLimitManager.ts`). Model ids and thresholds live in `config/constants.ts` (env-overridable); verify Groq/embedding/OCR model ids against the providers before relying on defaults.
+## Course answers and sources
 
-## Conventions
+`services/rag/CourseAnswerService.ts` is the shared normal/regenerated answer path. Retrieval combines exact filtered pgvector cosine ordering and PostgreSQL full-text search, RRF fusion, optional bounded reranking and conservative context packing. Local query embedding/reranking runs in isolated bounded worker threads with cancellation, deadlines and warmup/readiness.
 
-- **Config over magic numbers**: tunables live in `config/constants.ts` as env-overridable constants (`EMBEDDING_CONFIG`, `RERANKER_CONFIG`, `OCR_CONFIG`, `FACT_CHECK_CONFIG`, `SCORING`, etc.). Add new tunables there, not inline.
-- **Migrations** run on every boot, in order, registered in `db/migrations/runMigrations.ts` (raw SQL files in `db/migrations/`). They **must be idempotent** (`CREATE TABLE IF NOT EXISTS`, `INSERT ... ON CONFLICT DO NOTHING`). Append the next sequential `Migration N` before the `catch`.
-- **Fail-safe defaults at trust boundaries**: settings fail closed to strict; the reranker and OCR fail open to prior behavior; never return a silent empty document for a scanned upload.
-- Embedding-model changes require a full re-index (`scripts/reindexEmbeddings.ts --all`) and, if the dimension changes, a pgvector column migration.
+Course chat is always source-only. Web search, general-knowledge fallback, confidence percentages, jury/fact-check calls and post-validation emotional rewriting are retired from this path. Legacy settings/scoring/agent modules remain for compatibility but cannot enable external course-chat answers. The source-mode toggle is removed from the current UI.
+
+Generation returns structured blocks referencing server-owned evidence IDs. Unknown IDs or missing citation coverage trigger at most one repair, then abstention. Structural validation does not establish semantic entailment; instructor evaluation is required. Assistant messages, evidence manifests and citations persist in one transaction after permission/publication rechecks. Regeneration is rejected when a newer question arrived and replaces the old answer only after successful persistence.
+
+`routes/materialSources.ts` is mounted under `/api/material-sources`; source and answer/saved-reference endpoints recheck current access. Exact excerpts and locators come from immutable passages. Signed original links are generation-bound and created on demand with five-minute expiry; issued bearer links can remain usable until expiry. Material/folder deletion is soft; historical answers and linked saved copies with revoked evidence are withheld. Owned saved answers survive regeneration. Permanent root course deletion explicitly purges dependent database evidence in its existing transaction.
+
+## Generation configuration
+
+`services/ai/generation.ts` defines a generation-only contract, separate from grading APIs. `generationFactory.ts` explicitly selects VT ARC without mock or cross-provider fallback. The adapter pins the documented HTTPS inference gateway, denies redirects/upstream tools, bounds response size and retries, and uses cancellation/timeouts plus PostgreSQL advisory slots shared across replicas. Keep identical limits and spare pool capacity on replicas.
+
+`VT_ARC_API_KEY` is server-only; `VT_ARC_MODEL` must be a verified accessible model ID. Missing/invalid configuration fails clearly; a configured key/model does not prove upstream authentication. `scripts/probeVtArc.ts` checks synthetic content without opening the database or transmitting course documents. Access results are documented separately.
+
+`RAG_ENABLED=false` pauses new answers while preserving sources and grading. `RAG_ENABLED_COURSES` optionally limits canary courses; unset or * allows all authorized courses, empty allows none. API restart applies changes. `/api/ready` checks local dependencies/configuration and explicitly does not authenticate upstream. `/api/health` is liveness. Diagnostic routes require explicit non-production enablement and are blocked in production.
+
+## Conventions and verification
+
+Keep tunables in the relevant configuration module, not scattered magic numbers. Read dotenv before configuration modules; never log secrets or complete student prompts/answers in the new pipeline.
+
+Migrations run in order through `db/migrations/runMigrations.ts` and must be additive/idempotent. Material ingestion and answer schemas follow the existing migrations. Long backfills and coordinated index builds are explicit deployment tasks, not boot operations. Retain immutable runs needed by historical citations; do not use the legacy general-knowledge path for rollback.
+
+Database integration suites are opt-in through `RAG_TEST_DATABASE_URL` and temporary schemas. Use only the isolated test database described in the runbook. Model/provider fixtures do not establish real answer quality. Real ARC access, GCS backfill, instructor-reviewed support/abstention evaluation and department load tests remain rollout gates.

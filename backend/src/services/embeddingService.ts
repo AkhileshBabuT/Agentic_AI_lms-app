@@ -15,15 +15,21 @@ function logToFile(message: string) {
 
 // Global pipeline instance
 let embeddingPipeline: FeatureExtractionPipeline | null = null;
+let pipelineLoading: Promise<FeatureExtractionPipeline> | null = null;
 
 async function getPipeline(): Promise<FeatureExtractionPipeline> {
-  if (!embeddingPipeline) {
+  if (embeddingPipeline) return embeddingPipeline;
+  if (!pipelineLoading) {
     logToFile(`Initializing Xenova local embedding model: ${EMBEDDING_CONFIG.MODEL_ID}`);
-    embeddingPipeline = await pipeline('feature-extraction', EMBEDDING_CONFIG.MODEL_ID, {
+    pipelineLoading = pipeline('feature-extraction', EMBEDDING_CONFIG.MODEL_ID, {
       quantized: true,
-    });
+      revision: EMBEDDING_CONFIG.MODEL_REVISION,
+    }).then(loaded => {
+      embeddingPipeline = loaded;
+      return loaded;
+    }).finally(() => { pipelineLoading = null; });
   }
-  return embeddingPipeline;
+  return pipelineLoading;
 }
 
 /**
