@@ -18,7 +18,8 @@ function positiveId(value: string): number | null {
 }
 
 function respondToAnswerError(res: Response, error: unknown): void {
-  const candidate = error as { status?: number; statusCode?: number; name?: string };
+  const candidate = error as { status?: number; statusCode?: number; name?: string;
+    code?: string; upstreamStatus?: number };
   const status = candidate?.status ?? candidate?.statusCode;
   if (status === 400) {
     res.status(400).json({ error: 'The question is empty or exceeds the course assistant input limit.' });
@@ -30,7 +31,11 @@ function respondToAnswerError(res: Response, error: unknown): void {
     res.status(429).json({ error: 'The course assistant is busy. Please try again shortly.' });
   } else {
     // Do not return provider bodies, prompts, credentials, or database details.
-    console.error('Course answer request failed', { type: candidate?.name ?? 'Error' });
+    console.error('Course answer request failed', {
+      type: candidate?.name ?? 'Error',
+      ...(candidate?.code ? { code: candidate.code } : {}),
+      ...(candidate?.upstreamStatus ? { upstreamStatus: candidate.upstreamStatus } : {}),
+    });
     res.status(503).json({ error: 'The course assistant is temporarily unavailable. Please try again.' });
   }
 }
