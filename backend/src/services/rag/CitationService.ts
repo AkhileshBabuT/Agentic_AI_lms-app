@@ -1,10 +1,53 @@
 import { pool } from '../../config/database';
 import { generateSignedUrl } from '../../config/storage';
-import { assertCourseAccess, COURSE_ACCESS_SQL, Queryable } from './access';
+import { assertCourseAccess, COURSE_ACCESS_SQL, courseAccessPredicate, Queryable } from './access';
 import { passageSource } from './evidence';
 import { SourceReference, RagAccessError, EvidencePassage } from './types';
 
 export interface AuthorizedAnswerRecord { sources: SourceReference[]; restricted: boolean }
+
+/** One authorization and citation read for a page of visible agent messages. */
+export async function getAuthorizedAnswerRecords(messageIds: number[], userId: number, role: string,
+  db: Queryable = pool): Promise<Map<number, AuthorizedAnswerRecord>> {
+  if (messageIds.length === 0) return new Map();
+  const result = await db.query(`SELECT msg.id AS message_id, ar.id AS answer_run_id,
+      ac.answer_run_id AS citation_id, ac.citation_number, ac.evidence_id, ac.chunk_id,
+      ac.material_id, ac.material_name, ac.version_id, ac.run_id, ac.excerpt, ac.locator,
+      mir.metadata->>'coverage_warning' AS coverage_warning,
+      COALESCE(cm.deleted_at IS NULL AND cm.visibility='published'
+        AND mir.status='published' AND mv.id=mir.version_id
+        AND mc.run_id=mir.id AND cm.course_id=cs.course_id, FALSE) AS accessible
+    FROM chat_messages msg
+    JOIN chat_sessions cs ON cs.id=msg.session_id
+    LEFT JOIN answer_runs ar ON ar.message_id=msg.id
+    LEFT JOIN answer_citations ac ON ac.answer_run_id=ar.id
+    LEFT JOIN material_chunks mc ON mc.id=ac.chunk_id
+    LEFT JOIN course_materials cm ON cm.id=ac.material_id
+    LEFT JOIN material_index_runs mir ON mir.id=ac.run_id
+    LEFT JOIN material_versions mv ON mv.id=ac.version_id
+    WHERE msg.id=ANY($1::bigint[]) AND cs.student_id=$2 AND cs.status<>'deleted'
+      AND msg.sender_type='agent' AND msg.is_deleted=FALSE
+      AND ${courseAccessPredicate('cs', '$2', '$3')}
+    ORDER BY msg.id, ac.citation_number`, [messageIds, userId, role]);
+  const records = new Map<number, AuthorizedAnswerRecord>();
+  for (const row of result.rows) {
+    const id = Number(row.message_id);
+    let record = records.get(id);
+    if (!record) { record = { sources: [], restricted: false }; records.set(id, record); }
+    if (row.citation_id == null) continue;
+    if (!row.accessible) { record.restricted = true; continue; }
+    record.sources.push({ citationNumber: row.citation_number, evidenceId: row.evidence_id,
+      chunkId: row.chunk_id, materialId: row.material_id, materialName: row.material_name,
+      versionId: row.version_id, runId: row.run_id, excerpt: row.excerpt,
+      locator: row.locator, sourceType: 'course_material', pageNumber: row.locator?.page,
+      section: row.locator?.section, url: null, relevance: null,
+      coverageWarning: row.coverage_warning });
+  }
+  // A revoked citation withholds all sources, including those that remain accessible.
+  for (const record of records.values()) if (record.restricted) record.sources = [];
+  if (records.size !== new Set(messageIds).size) throw new RagAccessError('This answer is unavailable');
+  return records;
+}
 
 /** Read source rows afresh: JSON on an old message is not an authorization decision. */
 export async function getAuthorizedAnswerRecord(messageId: number, userId: number, role: string, db: Queryable = pool, allowReplaced = false): Promise<AuthorizedAnswerRecord> {

@@ -4,6 +4,7 @@ import { authenticate, authorize } from '../middleware/auth';
 import { generateSignedUrl } from '../config/storage';
 import { getSourceOfTruthMode, setSourceOfTruthMode } from '../services/settingsService';
 import { purgeCourseIndex } from '../services/materials/deleteCourseIndex';
+import { parseLimit, decodeCursor, encodeCursor, cursorFromRow } from '../utils/pagination';
 
 const router = express.Router();
 
@@ -14,19 +15,31 @@ router.use(authorize('root'));
 // Get all pending professor approvals
 router.get('/professors/pending', async (req, res) => {
   try {
+    let limit: number, cursor;
+    const scope = 'root-professors-pending';
+    try { limit = parseLimit(req.query.limit); cursor = decodeCursor(req.query.cursor, scope); }
+    catch { return res.status(400).json({ error: 'Invalid pagination' }); }
     const result = await pool.query(
-      `SELECT u.id, u.full_name, u.email, u.status, u.created_at,
-              ci.course_id, c.title as course_title
+      `SELECT u.id, u.full_name, u.email, u.status, u.created_at, u.created_at::text AS cursor_time,
+              assigned.course_id, assigned.course_title
        FROM users u
-       LEFT JOIN course_instructors ci ON u.id = ci.user_id
-       LEFT JOIN courses c ON ci.course_id = c.id
+       LEFT JOIN LATERAL (
+         SELECT ci.course_id, c.title AS course_title FROM course_instructors ci
+         JOIN courses c ON c.id=ci.course_id WHERE ci.user_id=u.id
+         ORDER BY ci.course_id LIMIT 1
+       ) assigned ON TRUE
        WHERE u.role = 'professor' AND u.status = 'pending'
-       ORDER BY u.created_at DESC`
+       ${cursor ? 'AND (u.created_at,u.id) < ($1::timestamp,$2::bigint)' : ''}
+       ORDER BY u.created_at DESC,u.id DESC LIMIT $${cursor ? 3 : 1}`,
+      cursor ? [cursor.at, cursor.id, limit + 1] : [limit + 1]
     );
 
+    const hasMore = result.rows.length > limit;
+    const professors = result.rows.slice(0, limit);
     res.json({
       message: 'Pending professor approvals retrieved successfully',
-      professors: result.rows
+      items: professors, professors,
+      page: { hasMore, nextCursor: hasMore ? encodeCursor(cursorFromRow(professors[professors.length - 1], 'cursor_time'), scope) : null }
     });
   } catch (error) {
     console.error('Error fetching pending professors:', error);
@@ -93,8 +106,12 @@ router.patch('/professors/:id/status', async (req, res) => {
 router.get('/users', async (req, res) => {
   try {
     const { role, status } = req.query;
+    let limit: number, cursor;
+    const scope = `root-users:${role ?? ''}:${status ?? ''}`;
+    try { limit = parseLimit(req.query.limit); cursor = decodeCursor(req.query.cursor, scope); }
+    catch { return res.status(400).json({ error: 'Invalid pagination' }); }
 
-    let query = 'SELECT id, full_name, email, role, status, created_at, updated_at FROM users WHERE 1=1';
+    let query = 'SELECT id, full_name, email, role, status, created_at, updated_at, created_at::text AS cursor_time FROM users WHERE 1=1';
     const params: any[] = [];
     let paramCount = 1;
 
@@ -110,13 +127,21 @@ router.get('/users', async (req, res) => {
       paramCount++;
     }
 
-    query += ' ORDER BY created_at DESC';
+    if (cursor) {
+      query += ` AND (created_at,id) < ($${paramCount}::timestamp,$${paramCount + 1}::bigint)`;
+      params.push(cursor.at, cursor.id); paramCount += 2;
+    }
+    query += ` ORDER BY created_at DESC,id DESC LIMIT $${paramCount}`;
+    params.push(limit + 1);
 
     const result = await pool.query(query, params);
 
+    const hasMore = result.rows.length > limit;
+    const users = result.rows.slice(0, limit);
     res.json({
       message: 'Users retrieved successfully',
-      users: result.rows
+      items: users, users,
+      page: { hasMore, nextCursor: hasMore ? encodeCursor(cursorFromRow(users[users.length - 1], 'cursor_time'), scope) : null }
     });
   } catch (error) {
     console.error('Error fetching users:', error);
@@ -127,8 +152,13 @@ router.get('/users', async (req, res) => {
 // Get all courses
 router.get('/courses', async (req, res) => {
   try {
+    let limit: number, cursor;
+    const scope = 'root-courses';
+    try { limit = parseLimit(req.query.limit); cursor = decodeCursor(req.query.cursor, scope); }
+    catch { return res.status(400).json({ error: 'Invalid pagination' }); }
     const result = await pool.query(
       `SELECT c.id, c.title, c.description, c.created_at, c.updated_at,
+              c.created_at::text AS cursor_time,
               c.instructor_id,
               u.full_name as instructor_name,
               u.email as instructor_email,
@@ -136,13 +166,18 @@ router.get('/courses', async (req, res) => {
        FROM courses c
        LEFT JOIN users u ON c.instructor_id = u.id
        LEFT JOIN enrollments e ON c.id = e.course_id
+       ${cursor ? 'WHERE (c.created_at,c.id) < ($1::timestamp,$2::bigint)' : ''}
        GROUP BY c.id, u.id
-       ORDER BY c.created_at DESC`
+       ORDER BY c.created_at DESC,c.id DESC LIMIT $${cursor ? 3 : 1}`,
+      cursor ? [cursor.at, cursor.id, limit + 1] : [limit + 1]
     );
 
+    const hasMore = result.rows.length > limit;
+    const courses = result.rows.slice(0, limit);
     res.json({
       message: 'Courses retrieved successfully',
-      courses: result.rows
+      items: courses, courses,
+      page: { hasMore, nextCursor: hasMore ? encodeCursor(cursorFromRow(courses[courses.length - 1], 'cursor_time'), scope) : null }
     });
   } catch (error) {
     console.error('Error fetching courses:', error);
@@ -390,19 +425,28 @@ router.delete('/users/:id', async (req, res) => {
 // Get all enrollments
 router.get('/enrollments', async (req, res) => {
   try {
+    let limit: number, cursor;
+    const scope = 'root-enrollments';
+    try { limit = parseLimit(req.query.limit); cursor = decodeCursor(req.query.cursor, scope); }
+    catch { return res.status(400).json({ error: 'Invalid pagination' }); }
     const result = await pool.query(
-      `SELECT e.id, e.enrolled_at,
+      `SELECT e.id, e.enrolled_at, e.enrolled_at::text AS cursor_time,
               e.user_id, u.full_name as student_name, u.email as student_email,
               e.course_id, c.title as course_title
        FROM enrollments e
        JOIN users u ON e.user_id = u.id
        JOIN courses c ON e.course_id = c.id
-       ORDER BY e.enrolled_at DESC`
+       ${cursor ? 'WHERE (e.enrolled_at,e.id) < ($1::timestamp,$2::bigint)' : ''}
+       ORDER BY e.enrolled_at DESC,e.id DESC LIMIT $${cursor ? 3 : 1}`,
+      cursor ? [cursor.at, cursor.id, limit + 1] : [limit + 1]
     );
 
+    const hasMore = result.rows.length > limit;
+    const enrollments = result.rows.slice(0, limit);
     res.json({
       message: 'Enrollments retrieved successfully',
-      enrollments: result.rows
+      items: enrollments, enrollments,
+      page: { hasMore, nextCursor: hasMore ? encodeCursor(cursorFromRow(enrollments[enrollments.length - 1], 'cursor_time'), scope) : null }
     });
   } catch (error) {
     console.error('Error fetching enrollments:', error);
@@ -443,8 +487,12 @@ router.get('/stats', async (req, res) => {
 // Get all professors with their assigned courses
 router.get('/professors', async (req, res) => {
   try {
+    let limit: number, cursor;
+    const scope = 'root-professors';
+    try { limit = parseLimit(req.query.limit); cursor = decodeCursor(req.query.cursor, scope); }
+    catch { return res.status(400).json({ error: 'Invalid pagination' }); }
     const result = await pool.query(
-      `SELECT u.id, u.full_name, u.email, u.status, u.created_at,
+      `SELECT u.id, u.full_name, u.email, u.status, u.created_at, u.created_at::text AS cursor_time,
               json_agg(
                 json_build_object(
                   'course_id', c.id,
@@ -456,13 +504,18 @@ router.get('/professors', async (req, res) => {
        LEFT JOIN course_instructors ci ON u.id = ci.user_id
        LEFT JOIN courses c ON ci.course_id = c.id
        WHERE u.role = 'professor'
+       ${cursor ? 'AND (u.created_at,u.id) < ($1::timestamp,$2::bigint)' : ''}
        GROUP BY u.id
-       ORDER BY u.created_at DESC`
+       ORDER BY u.created_at DESC,u.id DESC LIMIT $${cursor ? 3 : 1}`,
+      cursor ? [cursor.at, cursor.id, limit + 1] : [limit + 1]
     );
 
+    const hasMore = result.rows.length > limit;
+    const professors = result.rows.slice(0, limit);
     res.json({
       message: 'Professors retrieved successfully',
-      professors: result.rows
+      items: professors, professors,
+      page: { hasMore, nextCursor: hasMore ? encodeCursor(cursorFromRow(professors[professors.length - 1], 'cursor_time'), scope) : null }
     });
   } catch (error) {
     console.error('Error fetching professors:', error);
@@ -630,9 +683,13 @@ router.put('/settings/source-of-truth', async (req, res) => {
 router.get('/files/materials', async (req, res) => {
   try {
     const { courseId, professorId } = req.query;
+    let limit: number, cursor;
+    const scope = `root-materials:${courseId ?? ''}:${professorId ?? ''}`;
+    try { limit = parseLimit(req.query.limit); cursor = decodeCursor(req.query.cursor, scope); }
+    catch { return res.status(400).json({ error: 'Invalid pagination' }); }
 
     let query = `
-      SELECT cm.*,
+      SELECT cm.*, cm.uploaded_at::text AS cursor_time,
              c.title as course_title, c.id as course_id,
              u.full_name as uploader_name, u.email as uploader_email
       FROM course_materials cm
@@ -655,13 +712,21 @@ router.get('/files/materials', async (req, res) => {
       paramCount++;
     }
 
-    query += ' ORDER BY cm.uploaded_at DESC';
+    if (cursor) {
+      query += ` AND (cm.uploaded_at,cm.id) < ($${paramCount}::timestamp,$${paramCount + 1}::bigint)`;
+      params.push(cursor.at, cursor.id); paramCount += 2;
+    }
+    query += ` ORDER BY cm.uploaded_at DESC,cm.id DESC LIMIT $${paramCount}`;
+    params.push(limit + 1);
 
     const result = await pool.query(query, params);
+    const hasMore = result.rows.length > limit;
+    const materials = result.rows.slice(0, limit);
 
     res.json({
       message: 'Course materials retrieved successfully',
-      materials: result.rows
+      items: materials, materials,
+      page: { hasMore, nextCursor: hasMore ? encodeCursor(cursorFromRow(materials[materials.length - 1], 'cursor_time'), scope) : null }
     });
   } catch (error) {
     console.error('Error fetching course materials:', error);
@@ -673,9 +738,13 @@ router.get('/files/materials', async (req, res) => {
 router.get('/files/submissions', async (req, res) => {
   try {
     const { courseId, studentId, assignmentId } = req.query;
+    let limit: number, cursor;
+    const scope = `root-submissions:${courseId ?? ''}:${studentId ?? ''}:${assignmentId ?? ''}`;
+    try { limit = parseLimit(req.query.limit); cursor = decodeCursor(req.query.cursor, scope); }
+    catch { return res.status(400).json({ error: 'Invalid pagination' }); }
 
     let query = `
-      SELECT asub.*,
+      SELECT asub.*, asub.submitted_at::text AS cursor_time,
              a.title as assignment_title, a.id as assignment_id,
              c.title as course_title, c.id as course_id,
              u.full_name as student_name, u.email as student_email,
@@ -717,13 +786,21 @@ router.get('/files/submissions', async (req, res) => {
       paramCount++;
     }
 
-    query += ' GROUP BY asub.id, a.id, c.id, u.id ORDER BY asub.submitted_at DESC';
+    if (cursor) {
+      query += ` AND (asub.submitted_at,asub.id) < ($${paramCount}::timestamp,$${paramCount + 1}::bigint)`;
+      params.push(cursor.at, cursor.id); paramCount += 2;
+    }
+    query += ` GROUP BY asub.id, a.id, c.id, u.id ORDER BY asub.submitted_at DESC,asub.id DESC LIMIT $${paramCount}`;
+    params.push(limit + 1);
 
     const result = await pool.query(query, params);
+    const hasMore = result.rows.length > limit;
+    const submissions = result.rows.slice(0, limit);
 
     res.json({
       message: 'Assignment submissions retrieved successfully',
-      submissions: result.rows
+      items: submissions, submissions,
+      page: { hasMore, nextCursor: hasMore ? encodeCursor(cursorFromRow(submissions[submissions.length - 1], 'cursor_time'), scope) : null }
     });
   } catch (error) {
     console.error('Error fetching submissions:', error);

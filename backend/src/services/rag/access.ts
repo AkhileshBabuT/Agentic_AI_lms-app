@@ -3,6 +3,20 @@ import { CourseIdentity, RagAccessError } from './types';
 
 export interface Queryable { query: (sql: string, values?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }> }
 
+/** SQL equivalent of assertCourseAccess for set-based reads. Callers supply trusted aliases and placeholders. */
+export function courseAccessPredicate(courseAlias: string, userParam: string, roleParam: string): string {
+  return `EXISTS (SELECT 1 FROM users access_user WHERE access_user.id=${userParam}
+    AND access_user.role=${roleParam}
+    AND COALESCE(access_user.status,'active') NOT IN ('pending','rejected')
+    AND (${roleParam}='root'
+      OR (${roleParam}='student' AND EXISTS (SELECT 1 FROM enrollments access_enrollment
+        WHERE access_enrollment.course_id=${courseAlias}.course_id AND access_enrollment.user_id=${userParam}))
+      OR (${roleParam}='professor' AND EXISTS (SELECT 1 FROM courses access_course
+        WHERE access_course.id=${courseAlias}.course_id AND (access_course.instructor_id=${userParam}
+          OR EXISTS (SELECT 1 FROM course_instructors access_instructor
+            WHERE access_instructor.course_id=access_course.id AND access_instructor.user_id=${userParam}))))))`;
+}
+
 /** Re-read the account role and membership, rather than trusting a stale request role. */
 export async function assertCourseAccess(identity: CourseIdentity, db: Queryable = pool, lock = false): Promise<void> {
   const user = await db.query(`SELECT role, status FROM users WHERE id=$1${lock ? ' FOR SHARE' : ''}`, [identity.userId]);

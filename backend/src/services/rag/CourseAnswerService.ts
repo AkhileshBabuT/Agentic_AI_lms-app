@@ -29,13 +29,14 @@ interface AnswerDependencies {
 
 /** Dependencies can be substituted without loading local model assets in regression tests. */
 export async function answerCourseQuestion(
-  input: CourseIdentity & { question: string; signal?: AbortSignal }, dependencies: AnswerDependencies = {}
+  input: CourseIdentity & { question: string; signal?: AbortSignal; onStage?: (stage: string) => void }, dependencies: AnswerDependencies = {}
 ): Promise<CourseAnswer> {
   if (!RAG_CONFIG.ENABLED || (RAG_CONFIG.COURSE_ALLOWLIST && !RAG_CONFIG.COURSE_ALLOWLIST.includes(input.courseId))) {
     throw Object.assign(new Error('Course answers are not enabled for this course'), { status: 503 });
   }
   const question = input.question.trim();
   if (!question || question.length > RAG_CONFIG.QUESTION_MAX_CHARS) throw Object.assign(new Error('Question is empty or too long'), { status: 400 });
+  input.onStage?.('searching_materials');
   const retrievalStarted = Date.now();
   const evidence = await (dependencies.retrieve ?? retrieveCourseEvidence)(input, question, input.signal);
   if (!(await (dependencies.verify ?? verifyEvidence)(input, evidence))) throw new RagConflictError();
@@ -43,7 +44,11 @@ export async function answerCourseQuestion(
     retrievalDurationMs: Date.now() - retrievalStarted, evidencePassages: evidence.length,
     retrievalStrategy: 'hybrid-rrf-v1',
     reranker: RAG_CONFIG.RERANK_ENABLED ? { model: RERANKER_CONFIG.MODEL_ID, revision: RERANKER_CONFIG.MODEL_REVISION } : null };
-  if (!evidence.length) return renderAnswer({ status: 'insufficient_evidence', blocks: [] }, [], { ...baseMetadata, answerStatus: 'insufficient_evidence' });
+  if (!evidence.length) {
+    input.onStage?.('validating_citations');
+    return renderAnswer({ status: 'insufficient_evidence', blocks: [] }, [], { ...baseMetadata, answerStatus: 'insufficient_evidence' });
+  }
+  input.onStage?.('generating_answer');
   const provider = dependencies.provider ?? (await import('../ai/generationFactory')).getGenerationProvider();
   const messages: GenerationMessage[] = [
     { role: 'system', content: SYSTEM },
@@ -52,6 +57,7 @@ export async function answerCourseQuestion(
   const generationStarted = Date.now();
   let output = await provider.generate({ messages, signal: input.signal });
   let structured;
+  input.onStage?.('validating_citations');
   try { structured = validateStructuredAnswer(output.content, evidence); }
   catch {
     if (!(await (dependencies.verify ?? verifyEvidence)(input, evidence))) throw new RagConflictError();
@@ -71,7 +77,7 @@ export async function answerCourseQuestion(
 
 export async function persistCourseAnswer(input: CourseIdentity & {
   sessionId: number; answer: CourseAnswer; regeneratedFrom?: number;
-  questionMessageId?: number; isRegeneration?: boolean;
+  questionMessageId?: number; isRegeneration?: boolean; idempotencyKey?: string;
 }): Promise<any> {
   const client = await pool.connect();
   try {
@@ -98,6 +104,7 @@ export async function persistCourseAnswer(input: CourseIdentity & {
     const metadata = { ...input.answer.metadata, sourceOfTruthMode: 'strict', ragPipelineVersion: RAG_PIPELINE_VERSION,
       answerStatus: input.answer.status, sources: input.answer.sources,
       ...(input.questionMessageId ? { questionMessageId: input.questionMessageId } : {}),
+      ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
       ...(input.regeneratedFrom ? { regeneratedFrom: input.regeneratedFrom } : {}) };
     const result = await client.query(`INSERT INTO chat_messages(session_id,sender_type,content,message_metadata) VALUES($1,'agent',$2,$3::jsonb) RETURNING *`, [input.sessionId, input.answer.content, JSON.stringify(metadata)]);
     const message = result.rows[0];
