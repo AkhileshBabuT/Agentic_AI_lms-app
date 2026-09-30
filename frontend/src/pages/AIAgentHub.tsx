@@ -1,7 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import { chatAPI } from '../services/api';
 import { useToast } from '../components/Toast';
+import { Skeleton, InlineAlert, Button } from '../components/ui';
+import { chatQueries } from '../data/queries';
+import { queryKeys } from '../data/queryKeys';
 import './AIAgentHub.css';
 
 interface Course {
@@ -38,50 +43,28 @@ interface GeneratedContent {
 }
 
 const AIAgentHub: React.FC = () => {
-  const [courses, setCourses] = useState<Course[]>([]);
-  const [sessions, setSessions] = useState<ChatSession[]>([]);
-  const [generatedContent, setGeneratedContent] = useState<GeneratedContent[]>([]);
-  const [loading, setLoading] = useState(true);
+  const coursesQuery = useQuery(chatQueries.courses());
+  const sessionsQuery = useQuery(chatQueries.sessions({ status: 'active' }));
+  const contentQuery = useQuery(chatQueries.generatedContent());
+  const courses: Course[] = coursesQuery.data?.courses ?? [];
+  const sessions: ChatSession[] = sessionsQuery.data?.sessions ?? [];
+  const generatedContent: GeneratedContent[] = contentQuery.data?.content ?? [];
   const [activeTab, setActiveTab] = useState<'courses' | 'history' | 'content'>('courses');
   const { showToast } = useToast();
   const navigate = useNavigate();
-
-  useEffect(() => {
-    loadData();
-  }, []);
-
-  const loadData = async () => {
-    try {
-      setLoading(true);
-
-      // Load courses
-      const coursesResponse = await chatAPI.getCourses();
-      setCourses(coursesResponse.data.courses);
-
-      // Load chat sessions
-      const sessionsResponse = await chatAPI.getSessions({ status: 'active' });
-      setSessions(sessionsResponse.data.sessions);
-
-      // Load generated content
-      const contentResponse = await chatAPI.getGeneratedContent({ isSaved: true });
-      setGeneratedContent(contentResponse.data.content);
-
-    } catch (error: any) {
-      console.error('Error loading AI Agent Hub data:', error);
-      showToast(error.response?.data?.error || 'Failed to load data', 'error');
-    } finally {
-      setLoading(false);
-    }
-  };
+  const queryClient = useQueryClient();
 
   const handleStartChat = async (courseId: number) => {
     try {
       const response = await chatAPI.createSession(courseId);
       const sessionId = response.data.session.id;
+      void queryClient.invalidateQueries({ queryKey: ['sessions'] });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.chatCourses });
       navigate(`/chat/${sessionId}`);
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error starting chat:', error);
-      showToast(error.response?.data?.error || 'Failed to start chat', 'error');
+      const message = axios.isAxiosError(error) ? error.response?.data?.error : undefined;
+      showToast(typeof message === 'string' ? message : 'Failed to start chat', 'error');
     }
   };
 
@@ -121,17 +104,6 @@ const AIAgentHub: React.FC = () => {
     };
     return labels[type] || type;
   };
-
-  if (loading) {
-    return (
-      <div className="ai-agent-hub">
-        <div className="loading-container">
-          <div className="loading-spinner"></div>
-          <p>Loading AI Agent Hub...</p>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="ai-agent-hub">
@@ -180,7 +152,10 @@ const AIAgentHub: React.FC = () => {
               {/* <p>Select any of your enrolled courses to start a conversation with your AI assistant</p> */}
             </div>
 
-            {courses.length === 0 ? (
+            {coursesQuery.isPending && <Skeleton label="Loading chat courses" />}
+            {coursesQuery.isError && <InlineAlert tone="danger" action={<Button onClick={() => void coursesQuery.refetch()}>Retry</Button>}>Could not load your courses.</InlineAlert>}
+
+            {!coursesQuery.isPending && !coursesQuery.isError && courses.length === 0 ? (
               <div className="empty-state">
                 <div className="empty-icon">📚</div>
                 <h3>No Courses Enrolled</h3>
@@ -232,7 +207,10 @@ const AIAgentHub: React.FC = () => {
                 <p>Continue your previous conversations or review past interactions</p>
             </div>
 
-            {sessions.length === 0 ? (
+            {sessionsQuery.isPending && <Skeleton label="Loading chat history" />}
+            {sessionsQuery.isError && <InlineAlert tone="danger" action={<Button onClick={() => void sessionsQuery.refetch()}>Retry</Button>}>Could not load chat history.</InlineAlert>}
+
+            {!sessionsQuery.isPending && !sessionsQuery.isError && sessions.length === 0 ? (
               <div className="empty-state">
                 <div className="empty-icon">💬</div>
                 <h3>No Chat History</h3>
@@ -279,7 +257,10 @@ const AIAgentHub: React.FC = () => {
               <p>Summaries, practice questions, and study materials created by your AI assistants</p>
             </div>
 
-            {generatedContent.length === 0 ? (
+            {contentQuery.isPending && <Skeleton label="Loading generated content" />}
+            {contentQuery.isError && <InlineAlert tone="danger" action={<Button onClick={() => void contentQuery.refetch()}>Retry</Button>}>Could not load generated content.</InlineAlert>}
+
+            {!contentQuery.isPending && !contentQuery.isError && generatedContent.length === 0 ? (
               <div className="empty-state">
                 <div className="empty-icon">📝</div>
                 <h3>No Generated Content</h3>

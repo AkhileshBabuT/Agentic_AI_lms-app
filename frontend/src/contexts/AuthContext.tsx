@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import type { ReactNode } from 'react';
 import axios from 'axios';
+import { queryClient } from '../data/queryClient';
 
 interface User {
   id: number;
@@ -46,6 +47,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           console.error('Token verification failed:', error);
           localStorage.removeItem('token');
           localStorage.removeItem('user');
+          queryClient.clear();
           setToken(null);
           setUser(null);
         }
@@ -62,13 +64,15 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       const { user: userData, token: userToken } = response.data;
 
       localStorage.setItem('token', userToken);
+      queryClient.clear();
       localStorage.setItem('user', JSON.stringify(userData));
       axios.defaults.headers.common['Authorization'] = `Bearer ${userToken}`;
 
       setUser(userData);
       setToken(userToken);
-    } catch (error: any) {
-      throw new Error(error.response?.data?.error || 'Login failed');
+    } catch (error: unknown) {
+      const message = axios.isAxiosError(error) ? error.response?.data?.error : undefined;
+      throw new Error(typeof message === 'string' ? message : 'Login failed');
     }
   };
 
@@ -78,6 +82,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       const { user: userData, token: userToken, requiresApproval } = response.data;
 
       localStorage.setItem('token', userToken);
+      queryClient.clear();
       localStorage.setItem('user', JSON.stringify(userData));
       axios.defaults.headers.common['Authorization'] = `Bearer ${userToken}`;
 
@@ -85,12 +90,14 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       setToken(userToken);
 
       return { requiresApproval: requiresApproval || false };
-    } catch (error: any) {
-      throw new Error(error.response?.data?.error || 'Signup failed');
+    } catch (error: unknown) {
+      const message = axios.isAxiosError(error) ? error.response?.data?.error : undefined;
+      throw new Error(typeof message === 'string' ? message : 'Signup failed');
     }
   };
 
   const logout = () => {
+    queryClient.clear();
     localStorage.removeItem('token');
     localStorage.removeItem('user');
     delete axios.defaults.headers.common['Authorization'];
@@ -114,6 +121,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   );
 };
 
+// The hook shares this context's public module so existing route imports stay stable.
+// eslint-disable-next-line react-refresh/only-export-components
 export const useAuth = () => {
   const context = useContext(AuthContext);
   if (context === undefined) {

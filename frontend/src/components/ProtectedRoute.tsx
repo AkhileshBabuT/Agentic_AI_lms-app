@@ -1,6 +1,7 @@
 import React from 'react';
 import { Navigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import RouteSkeleton from './RouteSkeleton';
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
@@ -11,11 +12,7 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children, allowedRoles 
   const { user, loading } = useAuth();
 
   if (loading) {
-    return (
-      <div className="loading-container">
-        <div className="loading-spinner">Loading...</div>
-      </div>
-    );
+    return <RouteSkeleton />;
   }
 
   if (!user) {

@@ -1,91 +1,54 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../components/Toast';
 import { studentAPI } from '../services/api';
 import MaterialIndexStatus from '../components/MaterialIndexStatus';
+import { Skeleton, InlineAlert, Button } from '../components/ui';
+import { courseQueries } from '../data/queries';
 import './CoursePage.css';
+
+interface Assignment { id: number; title: string; due_date?: string; description?: string; points: number }
+interface Announcement { id: number; title: string; date: string; content: string; author: string }
+interface Folder { id: number; name: string; created_at: string }
+interface Material { id: number; file_name: string; file_size: number; uploaded_at: string; ingestion_status?: string; ingestion_warning?: string; ingestion_error?: string; published_run_id?: string | null }
+interface Breadcrumb { id: number; name: string }
 
 const CoursePage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const { user, logout } = useAuth();
   const { showToast } = useToast();
   const [activeTab, setActiveTab] = useState('overview');
-  const [loading, setLoading] = useState(false);
-
-  const [course, setCourse] = useState<any>(null);
-  const [assignments, setAssignments] = useState<any[]>([]);
-  const [announcements, setAnnouncements] = useState<any[]>([]);
-  const [materials, setMaterials] = useState<any[]>([]);
-
   // Folder navigation state
   const [currentFolderId, setCurrentFolderId] = useState<number | null>(null);
-  const [folders, setFolders] = useState<any[]>([]);
-  const [breadcrumb, setBreadcrumb] = useState<any[]>([]);
-
-  useEffect(() => {
-    if (id) {
-      loadCourseData();
-    }
-  }, [id]);
-
-  useEffect(() => {
-    if (id && activeTab === 'materials') {
-      loadMaterials();
-    }
-  }, [activeTab, id, currentFolderId]);
-
-  const loadCourseData = async () => {
-    try {
-      setLoading(true);
-      const courseId = parseInt(id!);
-
-      const [courseRes, assignmentsRes, announcementsRes] = await Promise.all([
-        studentAPI.getCourseDetails(courseId),
-        studentAPI.getCourseAssignments(courseId),
-        studentAPI.getCourseAnnouncements(courseId)
-      ]);
-
-      setCourse(courseRes.data.course);
-      setAssignments(assignmentsRes.data.assignments || []);
-      setAnnouncements(announcementsRes.data.announcements || []);
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to load course data', 'error');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadMaterials = async () => {
-    try {
-      setLoading(true);
-      const courseId = parseInt(id!);
-      const [materialsRes, foldersRes] = await Promise.all([
-        studentAPI.getCourseMaterials(courseId, currentFolderId === null ? null : currentFolderId),
-        studentAPI.getCourseFolders(courseId, currentFolderId),
-      ]);
-      setMaterials(materialsRes.data.materials || []);
-      setFolders(foldersRes.data.folders || []);
-
-      if (currentFolderId !== null) {
-        const breadcrumbRes = await studentAPI.getCourseFolderBreadcrumb(courseId, currentFolderId);
-        setBreadcrumb(breadcrumbRes.data.breadcrumb || []);
-      } else {
-        setBreadcrumb([]);
-      }
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to load course materials', 'error');
-    } finally {
-      setLoading(false);
-    }
-  };
+  const courseId = Number(id);
+  const validId = Number.isSafeInteger(courseId) && courseId > 0;
+  const courseQuery = useQuery({ ...courseQueries.studentDetail(courseId), enabled: validId });
+  const assignmentsQuery = useInfiniteQuery({ ...courseQueries.assignmentPages(courseId), enabled: validId && activeTab === 'assignments' });
+  const announcementsQuery = useInfiniteQuery({ ...courseQueries.announcementPages(courseId), enabled: validId && activeTab === 'announcements' });
+  const materialsEnabled = validId && activeTab === 'materials';
+  const materialsQuery = useInfiniteQuery({ ...courseQueries.materialPages(courseId, currentFolderId), enabled: materialsEnabled });
+  const foldersQuery = useInfiniteQuery({ ...courseQueries.folderPages(courseId, currentFolderId), enabled: materialsEnabled });
+  const breadcrumbQuery = useQuery({ ...courseQueries.folderBreadcrumb(courseId, currentFolderId ?? 0), enabled: materialsEnabled && currentFolderId !== null });
+  const course = courseQuery.data?.course;
+  const assignments: Assignment[] = assignmentsQuery.data?.pages.flatMap(page => page.assignments ?? page.items ?? []) ?? [];
+  const announcements: Announcement[] = announcementsQuery.data?.pages.flatMap(page => page.announcements ?? page.items ?? []) ?? [];
+  const materials: Material[] = materialsQuery.data?.pages.flatMap(page => page.materials ?? page.items ?? []) ?? [];
+  const folders: Folder[] = foldersQuery.data?.pages.flatMap(page => page.folders ?? page.items ?? []) ?? [];
+  const breadcrumb: Breadcrumb[] = breadcrumbQuery.data?.breadcrumb ?? [];
+  const materialsLoading = materialsQuery.isPending || foldersQuery.isPending;
+  const materialError = materialsQuery.isError || foldersQuery.isError || breadcrumbQuery.isError;
+  const refreshMaterials = () => { void Promise.all([materialsQuery.refetch(), foldersQuery.refetch(), ...(currentFolderId === null ? [] : [breadcrumbQuery.refetch()])]); };
 
   const handleDownloadMaterial = async (materialId: number) => {
     try {
       const response = await studentAPI.downloadMaterial(materialId);
       window.open(response.data.url, '_blank');
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to download material', 'error');
+    } catch (error: unknown) {
+      const message = axios.isAxiosError(error) ? error.response?.data?.error : undefined;
+      showToast(typeof message === 'string' ? message : 'Failed to download material', 'error');
     }
   };
 
@@ -95,12 +58,9 @@ const CoursePage: React.FC = () => {
     return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
   };
 
-  if (!course) {
-    return <div className="loading">Loading...</div>;
-  }
-
-  console.log('CoursePage rendering with tabs - activeTab:', activeTab);
-  console.log('Assignments count:', assignments.length);
+  if (!validId) return <InlineAlert tone="danger">Invalid course link.</InlineAlert>;
+  if (courseQuery.isPending) return <Skeleton label="Loading course" lines={5} />;
+  if (courseQuery.isError || !course) return <InlineAlert tone="danger" title="Course unavailable" action={<Button onClick={() => void courseQuery.refetch()}>Retry</Button>}>Could not load this course.</InlineAlert>;
 
   const renderTabContent = () => {
     switch (activeTab) {
@@ -142,7 +102,9 @@ const CoursePage: React.FC = () => {
         return (
           <div className="assignments-content">
             <h2>Assignments</h2>
-            {assignments.length === 0 ? (
+            {assignmentsQuery.isPending && <Skeleton label="Loading assignments" />}
+            {assignmentsQuery.isError && <InlineAlert tone="danger" action={<Button onClick={() => void assignmentsQuery.refetch()}>Retry</Button>}>Could not load assignments.</InlineAlert>}
+            {!assignmentsQuery.isPending && !assignmentsQuery.isError && assignments.length === 0 ? (
               <p className="empty-message">No assignments available yet</p>
             ) : (
               <div className="assignments-list">
@@ -173,6 +135,7 @@ const CoursePage: React.FC = () => {
                 ))}
               </div>
             )}
+            {assignmentsQuery.hasNextPage && <Button variant="secondary" loading={assignmentsQuery.isFetchingNextPage} onClick={() => void assignmentsQuery.fetchNextPage()}>Load more assignments</Button>}
           </div>
         );
       
@@ -180,6 +143,8 @@ const CoursePage: React.FC = () => {
         return (
           <div className="announcements-content">
             <h2>Announcements</h2>
+            {announcementsQuery.isPending && <Skeleton label="Loading announcements" />}
+            {announcementsQuery.isError && <InlineAlert tone="danger" action={<Button onClick={() => void announcementsQuery.refetch()}>Retry</Button>}>Could not load announcements.</InlineAlert>}
             <div className="announcements-list">
               {announcements.map((announcement) => (
                 <div key={announcement.id} className="announcement-item">
@@ -194,6 +159,7 @@ const CoursePage: React.FC = () => {
                 </div>
               ))}
             </div>
+            {announcementsQuery.hasNextPage && <Button variant="secondary" loading={announcementsQuery.isFetchingNextPage} onClick={() => void announcementsQuery.fetchNextPage()}>Load more announcements</Button>}
           </div>
         );
       
@@ -201,7 +167,8 @@ const CoursePage: React.FC = () => {
         return (
           <div className="materials-content">
             <h2>Course Materials</h2>
-            <button type="button" className="btn-secondary" onClick={loadMaterials} disabled={loading}>Refresh status</button>
+            <button type="button" className="btn-secondary" onClick={refreshMaterials} disabled={materialsQuery.isFetching || foldersQuery.isFetching}>Refresh status</button>
+            {materialError && <InlineAlert tone="danger" action={<Button onClick={refreshMaterials}>Retry</Button>}>Could not load course materials.</InlineAlert>}
 
             {/* Breadcrumb Navigation */}
             <div className="folder-breadcrumb">
@@ -211,7 +178,7 @@ const CoursePage: React.FC = () => {
               >
                 🏠 Home
               </button>
-              {breadcrumb.map((crumb: any, index: number) => (
+              {breadcrumb.map((crumb, index: number) => (
                 <React.Fragment key={crumb.id}>
                   <span className="breadcrumb-separator">/</span>
                   <button
@@ -224,9 +191,9 @@ const CoursePage: React.FC = () => {
               ))}
             </div>
 
-            {loading ? (
-              <p>Loading materials...</p>
-            ) : folders.length === 0 && materials.length === 0 ? (
+            {materialsLoading ? (
+              <Skeleton label="Loading materials" />
+            ) : !materialError && folders.length === 0 && materials.length === 0 ? (
               <p className="empty-message">
                 {currentFolderId === null
                   ? 'No course materials available yet'
@@ -235,16 +202,14 @@ const CoursePage: React.FC = () => {
             ) : (
               <div className="materials-list">
                 {/* Folders first */}
-                {folders.map((folder: any) => (
+                {folders.map((folder) => (
                   <div
                     key={`folder-${folder.id}`}
                     className="material-card folder-card"
-                    onClick={() => setCurrentFolderId(folder.id)}
-                    style={{ cursor: 'pointer' }}
                   >
                     <div className="material-icon folder-icon">&#128193;</div>
                     <div className="material-info">
-                      <h3>{folder.name}</h3>
+                      <h3><button type="button" className="folder-open-button" onClick={() => setCurrentFolderId(folder.id)}>Open {folder.name}</button></h3>
                       <p className="material-meta">
                         Folder &bull; Created {new Date(folder.created_at).toLocaleDateString()}
                       </p>
@@ -253,7 +218,7 @@ const CoursePage: React.FC = () => {
                 ))}
 
                 {/* Files */}
-                {materials.map((material: any) => (
+                {materials.map((material) => (
                   <div key={`file-${material.id}`} className="material-card">
                     <div className="material-icon">&#128196;</div>
                     <div className="material-info">
@@ -276,6 +241,8 @@ const CoursePage: React.FC = () => {
                 ))}
               </div>
             )}
+            {foldersQuery.hasNextPage && <Button variant="secondary" loading={foldersQuery.isFetchingNextPage} onClick={() => void foldersQuery.fetchNextPage()}>Load more folders</Button>}
+            {materialsQuery.hasNextPage && <Button variant="secondary" loading={materialsQuery.isFetchingNextPage} onClick={() => void materialsQuery.fetchNextPage()}>Load more materials</Button>}
           </div>
         );
 

@@ -67,9 +67,9 @@
   font-size: 0.9rem;
 }
 
-.logout-button {
+.course-page .logout-button {
   background-color: var(--vt-orange);
-  color: white;
+  color: #23130c;
   border: none;
   padding: 10px 20px;
   border-radius: 6px;
@@ -79,7 +79,7 @@
   transition: background-color 0.2s ease;
 }
 
-.logout-button:hover {
+.course-page .logout-button:hover {
   background-color: var(--vt-orange-dark);
 }
 
@@ -591,6 +591,19 @@
 
 .folder-card:hover {
   border-left-color: var(--vt-maroon);
+}
+
+.course-page .folder-open-button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.course-page .folder-open-button:hover {
+  text-decoration: underline;
 }
 
 .folder-icon {

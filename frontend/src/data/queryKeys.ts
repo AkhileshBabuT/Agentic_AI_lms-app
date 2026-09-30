@@ -1,0 +1,17 @@
+export const queryKeys = {
+  auth: ['auth'] as const,
+  courses: ['courses'] as const,
+  course: (id: number) => ['courses', id] as const,
+  materials: (courseId: number, folderId?: number | null) => ['materials', courseId, folderId ?? null] as const,
+  assignments: (courseId: number) => ['assignments', courseId] as const,
+  announcements: (courseId: number) => ['announcements', courseId] as const,
+  folders: (courseId: number, folderId?: number | null) => ['folders', courseId, folderId ?? null] as const,
+  folderBreadcrumb: (courseId: number, folderId: number) => ['folderBreadcrumb', courseId, folderId] as const,
+  submissions: (assignmentId: number) => ['submissions', assignmentId] as const,
+  sessions: (filters?: { courseId?: number; status?: string }) => ['sessions', filters?.courseId ?? null, filters?.status ?? null] as const,
+  chatCourses: ['chat', 'courses'] as const,
+  generatedContent: (savedOnly: boolean) => ['chat', 'generatedContent', savedOnly] as const,
+  messages: (sessionId: number) => ['messages', sessionId] as const,
+  sources: (messageId: number) => ['sources', messageId] as const,
+  rootStats: ['root', 'stats'] as const,
+};
