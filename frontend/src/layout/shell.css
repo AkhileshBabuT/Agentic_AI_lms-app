@@ -1,0 +1,33 @@
+.app-shell { min-height: 100vh; background: var(--ui-canvas); }
+.app-shell__skip { position: fixed; top: -5rem; left: var(--ui-space-4); z-index: 100; padding: var(--ui-space-3); background: #fff; color: var(--ui-primary); }
+.app-shell__skip:focus { top: var(--ui-space-2); }
+.app-shell__topbar { position: sticky; top: 0; z-index: var(--ui-layer-nav); background: var(--ui-primary); color: #fff; }
+.app-shell__topbar-inner { display: flex; align-items: center; gap: var(--ui-space-4); max-width: var(--ui-content-width); min-height: 68px; margin: auto; padding: var(--ui-space-2) var(--ui-space-5); }
+.app-shell__brand { display: inline-flex; align-items: center; gap: var(--ui-space-3); color: #fff; font-size: 1.05rem; font-weight: 750; text-decoration: none; }
+.app-shell__brand:hover { color: #fff; }
+.app-shell__brand-mark { display: inline-grid; place-items: center; width: 38px; height: 38px; border: 1px solid #fff; border-radius: var(--ui-radius-sm); font-size: .86rem; letter-spacing: .04em; }
+.app-shell__account { display: flex; align-items: center; gap: var(--ui-space-3); margin-left: auto; font-size: var(--ui-text-sm); }
+.app-shell__account-name { max-width: 13rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 650; }
+.app-shell__account-role { color: #f4ceda; }
+.app-shell__logout { padding: .4rem .55rem; border: 1px solid #e8b9c9; border-radius: var(--ui-radius-sm); background: transparent; color: #fff; font-weight: 600; }
+.app-shell__logout:hover { background: var(--ui-primary-hover); }
+.app-shell__body { display: grid; grid-template-columns: 14rem minmax(0, 1fr); max-width: var(--ui-content-width); min-height: calc(100vh - 68px); margin: auto; }
+.app-shell__sidebar { display: flex; flex-direction: column; gap: var(--ui-space-5); padding: var(--ui-space-6) var(--ui-space-3); border-right: 1px solid var(--ui-border-soft); background: var(--ui-surface); }
+.app-shell__nav { display: grid; gap: var(--ui-space-1); }
+.app-shell__nav-link { display: block; min-height: 44px; padding: .65rem .8rem; border-radius: var(--ui-radius-sm); color: var(--ui-text); font-weight: 600; text-decoration: none; }
+.app-shell__nav-link:hover { background: var(--ui-surface-muted); color: var(--ui-primary); }
+.app-shell__nav-link--active { background: #f4e9ed; color: var(--ui-primary); box-shadow: inset 3px 0 var(--ui-primary); }
+.app-shell__sidebar-footer { margin-top: auto; padding: var(--ui-space-2); color: var(--ui-text-muted); font-size: var(--ui-text-sm); }
+.app-shell__main { min-width: 0; padding: var(--ui-space-8); }
+.app-shell__menu-button { display: none !important; color: #fff !important; }
+.app-page-header { margin-bottom: var(--ui-space-8); }
+.app-page-header__breadcrumbs ol { display: flex; flex-wrap: wrap; gap: var(--ui-space-2); margin: 0 0 var(--ui-space-4); padding: 0; list-style: none; color: var(--ui-text-muted); font-size: var(--ui-text-sm); }
+.app-page-header__breadcrumbs li + li::before { content: '/'; margin-right: var(--ui-space-2); color: var(--ui-text-subtle); }
+.app-page-header__row { display: flex; align-items: start; justify-content: space-between; gap: var(--ui-space-5); }
+.app-page-header h1 { margin: 0; font-size: clamp(1.7rem, 2.8vw, 2.5rem); line-height: 1.2; }
+.app-page-header p { max-width: 65ch; margin: var(--ui-space-2) 0 0; color: var(--ui-text-muted); }
+.app-page-header__actions { display: flex; flex-wrap: wrap; gap: var(--ui-space-2); }
+.app-shell__drawer-account { display: grid; gap: var(--ui-space-2); margin-top: var(--ui-space-8); padding-top: var(--ui-space-4); border-top: 1px solid var(--ui-border-soft); overflow-wrap: anywhere; }
+.app-shell__drawer-account .app-shell__logout { width: fit-content; background: var(--ui-primary); }
+@media (max-width: 800px) { .app-shell__body { display: block; } .app-shell__sidebar { display: none; } .app-shell__menu-button { display: inline-flex !important; } .app-shell__main { padding: var(--ui-space-5); } }
+@media (max-width: 560px) { .app-shell__topbar-inner { padding-inline: var(--ui-space-3); } .app-shell__brand { font-size: .9rem; } .app-shell__account-name, .app-shell__account-role, .app-shell__account .app-shell__logout { display: none; } .app-page-header__row { flex-direction: column; } .app-shell__main { padding: var(--ui-space-4); } }

@@ -1,0 +1,77 @@
+:root {
+  color-scheme: light;
+  --ui-canvas: #f7f4f0;
+  --ui-surface: #fff;
+  --ui-surface-muted: #f2eeea;
+  --ui-text: #242021;
+  --ui-text-muted: #595253;
+  --ui-text-subtle: #6c6263;
+  --ui-border: #bdb4b2;
+  --ui-border-soft: #ded7d4;
+  --ui-primary: #861f41;
+  --ui-primary-hover: #6d1935;
+  --ui-primary-active: #541328;
+  --ui-danger: #9a2637;
+  --ui-danger-surface: #fbecef;
+  --ui-success: #17613e;
+  --ui-success-surface: #e8f3ea;
+  --ui-warning: #87440f;
+  --ui-warning-surface: #fff3e7;
+  --ui-info: #175574;
+  --ui-info-surface: #eaf4f9;
+  --ui-font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --ui-text-sm: .875rem;
+  --ui-text-md: 1rem;
+  --ui-text-lg: 1.25rem;
+  --ui-space-1: .25rem;
+  --ui-space-2: .5rem;
+  --ui-space-3: .75rem;
+  --ui-space-4: 1rem;
+  --ui-space-5: 1.25rem;
+  --ui-space-6: 1.5rem;
+  --ui-space-8: 2rem;
+  --ui-space-12: 3rem;
+  --ui-radius-sm: .375rem;
+  --ui-radius-md: .625rem;
+  --ui-radius-lg: 1rem;
+  --ui-shadow-sm: 0 1px 3px rgb(39 30 24 / 8%);
+  --ui-shadow-md: 0 6px 18px rgb(39 30 24 / 10%);
+  --ui-shadow-lg: 0 16px 32px rgb(39 30 24 / 14%);
+  --ui-focus-ring: 0 0 0 3px #fff, 0 0 0 6px #861f41;
+  --ui-layer-nav: 20;
+  --ui-layer-overlay: 40;
+  --ui-layer-dialog: 50;
+  --ui-motion-fast: 140ms;
+  --ui-motion-normal: 220ms;
+  --ui-content-width: 90rem;
+  /* Preserve existing page classes while they move to the shared modules. */
+  --color-bg-white: var(--ui-surface);
+  --color-bg-light: var(--ui-canvas);
+  --color-bg-gray: var(--ui-surface-muted);
+  --color-text-primary: var(--ui-text);
+  --color-text-secondary: var(--ui-text-muted);
+  --color-text-light: var(--ui-text-subtle);
+  --color-border: var(--ui-border);
+  --color-border-light: var(--ui-border-soft);
+  --color-success: var(--ui-success);
+  --color-success-bg: var(--ui-success-surface);
+  --color-success-text: var(--ui-success);
+  --color-warning: var(--ui-warning);
+  --color-warning-bg: var(--ui-warning-surface);
+  --color-warning-text: var(--ui-warning);
+  --color-danger: var(--ui-danger);
+  --color-danger-bg: var(--ui-danger-surface);
+  --color-danger-text: var(--ui-danger);
+  --color-info: var(--ui-info);
+  --color-info-bg: var(--ui-info-surface);
+  --color-info-text: var(--ui-info);
+  --btn-secondary-bg: var(--ui-primary);
+  --btn-secondary-hover: var(--ui-primary-hover);
+  --shadow-sm: var(--ui-shadow-sm);
+  --shadow-md: var(--ui-shadow-md);
+  --shadow-lg: var(--ui-shadow-lg);
+  --focus-ring: var(--ui-focus-ring);
+}
+@media (prefers-reduced-motion: reduce) {
+  :root { --ui-motion-fast: 0ms; --ui-motion-normal: 0ms; }
+}

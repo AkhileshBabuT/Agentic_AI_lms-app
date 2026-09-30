@@ -216,15 +216,4 @@
 /* ============================================
    DARK MODE (Optional)
    ============================================ */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --color-bg-white: #1a1a1a;
-    --color-bg-light: #2b2b2b;
-    --color-bg-gray: #3a3a3a;
-    --color-text-primary: #e0e0e0;
-    --color-text-secondary: #b0b0b0;
-    --color-text-light: #909090;
-    --color-border: #404040;
-    --color-border-light: #353535;
-  }
-}
+/* The application uses an intentional light palette until all workflows are audited. */
