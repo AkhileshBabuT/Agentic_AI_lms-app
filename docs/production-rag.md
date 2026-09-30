@@ -32,10 +32,11 @@ From `backend/`:
 
 ```powershell
 npm run build
+npm run db:migrate
 npm start
 ```
 
-The normal API bootstrap runs the additive material-ingestion and answer migrations after the existing migrations. These migrations create schema only; they do not backfill materials. Apply them before launching workers. Retain normal database backups and GCS originals/generations. Unique object paths use create-only uploads; citations resolve generation-bound originals with fresh five-minute signed links.
+Run migrations before starting production API replicas or workers. Production API startup validates schema version 9 and does not run DDL. Local development retains automatic migration unless `DB_AUTO_MIGRATE=false`. These migrations create schema only; they do not backfill materials. Retain normal database backups and GCS originals/generations. Unique object paths use create-only uploads; citations resolve generation-bound originals with fresh five-minute signed links.
 
 Run the ingestion worker separately with the same database, GCS credentials, and embedding configuration:
 

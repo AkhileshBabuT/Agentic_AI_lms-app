@@ -2,10 +2,10 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import morgan from 'morgan';
 import dotenv from 'dotenv';
-import fs from 'fs';
-import path from 'path';
+import { monitorEventLoopDelay } from 'perf_hooks';
+import { logger, safeError } from './config/logger';
+import { requestLogger } from './middleware/requestLogger';
 import authRoutes from './routes/auth';
 import rootRoutes from './routes/root';
 import professorRoutes from './routes/professor';
@@ -14,7 +14,8 @@ import chatRoutes from './routes/chat';
 import materialSourceRoutes from './routes/materialSources';
 import gradingAssistantRoutes from './routes/gradingAssistant';
 import usageRoutes from './routes/usage';
-import { connectDB } from './config/database';
+import telemetryRoutes from './routes/telemetry';
+import { connectDB, closeDB, pool } from './config/database';
 import { checkRagReadiness } from './services/rag/readiness';
 import { warmRagModels } from './services/rag/modelInference';
 
@@ -22,39 +23,25 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-
-// Create global debug log file
-const DEBUG_LOG_PATH = path.join(__dirname, '../api-debug.log');
-fs.writeFileSync(DEBUG_LOG_PATH, `=== API Debug Log Started at ${new Date().toISOString()} ===\n\n`);
-
-function apiLog(message: string) {
-  const timestamp = new Date().toISOString();
-  const logMessage = `[${timestamp}] ${message}\n`;
-  fs.appendFileSync(DEBUG_LOG_PATH, logMessage);
-  // Removed console.log - logs only go to file
-}
-
-// Custom logging middleware to log ALL requests
-app.use((req, res, next) => {
-  const start = Date.now();
-  apiLog(`➡️  ${req.method} ${req.url}`);
-
-  res.on('finish', () => {
-    const duration = Date.now() - start;
-    apiLog(`⬅️  ${req.method} ${req.url} - ${res.statusCode} (${duration}ms)`);
+const eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
+eventLoopDelay.enable();
+const telemetryTimer = setInterval(() => {
+  logger.info({
+    event: 'runtime_health',
+    eventLoopP95Ms: Math.round(eventLoopDelay.percentile(95) / 1_000_000 * 100) / 100,
+    poolWaiting: pool.waitingCount,
+    poolIdle: pool.idleCount,
+    poolTotal: pool.totalCount,
   });
+  eventLoopDelay.reset();
+}, 60_000);
+telemetryTimer.unref();
 
-  next();
-});
+app.use(requestLogger);
 
 // Middleware
 app.use(helmet());
 app.use(cors());
-
-// Use morgan to write to our log file
-const morganStream = fs.createWriteStream(DEBUG_LOG_PATH, { flags: 'a' });
-app.use(morgan('combined', { stream: morganStream }));
-// Removed morgan('dev') - HTTP logs only go to file
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -69,7 +56,7 @@ app.use((req, res, next) => {
   next();
 });
 
-apiLog('🚀 Backend server starting up...');
+logger.info({ event: 'server_starting' });
 
 // Routes
 app.use('/api/auth', authRoutes);
@@ -80,10 +67,10 @@ app.use('/api/chat', chatRoutes);
 app.use('/api/material-sources', materialSourceRoutes);
 app.use('/api/grading-assistant', gradingAssistantRoutes);
 app.use('/api/usage', usageRoutes);
+app.use('/api/telemetry', telemetryRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
-  apiLog('❤️ HEALTH CHECK ENDPOINT HIT!');
   res.json({ message: 'LMS API is running!' });
 });
 
@@ -96,7 +83,6 @@ app.get('/api/ready', async (_req, res) => {
 // Debug test endpoint
 app.get('/api/debug-test', (req, res) => {
   const msg = '🧪 DEBUG TEST ENDPOINT HIT - CODE IS LOADED!';
-  apiLog(msg);
   res.json({ message: msg, timestamp: new Date().toISOString() });
 });
 
@@ -106,7 +92,6 @@ app.post('/api/test-create-course', async (req, res) => {
     const { pool } = await import('./config/database');
     const { title, description } = req.body;
 
-    apiLog(`🧪 TEST: Attempting to create course: ${title}`);
 
     // Try to create a test course
     const result = await pool.query(
@@ -114,7 +99,6 @@ app.post('/api/test-create-course', async (req, res) => {
       [title || 'Test Course', description || 'Test Description', null]
     );
 
-    apiLog(`✅ TEST: Course created successfully with ID: ${result.rows[0].id}`);
 
     res.json({
       success: true,
@@ -122,7 +106,7 @@ app.post('/api/test-create-course', async (req, res) => {
       course: result.rows[0]
     });
   } catch (error) {
-    apiLog(`❌ TEST: Course creation failed: ${error}`);
+    logger.error({ event: 'debug_course_create_failed', error: safeError(error) });
     res.status(500).json({
       success: false,
       error: 'Course creation failed',
@@ -138,7 +122,6 @@ app.get('/api/check-email/:email', async (req, res) => {
     const { pool } = await import('./config/database');
     const { email } = req.params;
 
-    apiLog(`🔍 Checking email: ${email}`);
 
     // Exact match
     const exactMatch = await pool.query(
@@ -164,7 +147,7 @@ app.get('/api/check-email/:email', async (req, res) => {
       totalUsers: allUsers.rows.length
     });
   } catch (error) {
-    apiLog(`❌ Email check failed: ${error}`);
+    logger.error({ event: 'debug_email_check_failed', error: safeError(error) });
     res.status(500).json({
       success: false,
       error: 'Email check failed',
@@ -178,7 +161,6 @@ app.get('/api/db-test', async (req, res) => {
   try {
     const { pool } = await import('./config/database');
 
-    apiLog('🔍 Testing database connection...');
 
     // Test basic query
     const result = await pool.query('SELECT NOW() as current_time, current_database() as db_name');
@@ -197,7 +179,6 @@ app.get('/api/db-test', async (req, res) => {
       "SELECT id, email, role FROM users WHERE LOWER(email) = LOWER('Student1@gmail.com')"
     );
 
-    apiLog('✅ Database connection successful!');
 
     res.json({
       success: true,
@@ -219,7 +200,7 @@ app.get('/api/db-test', async (req, res) => {
       }
     });
   } catch (error) {
-    apiLog(`❌ Database connection failed: ${error}`);
+    logger.error({ event: 'debug_database_check_failed', error: safeError(error) });
     res.status(500).json({
       success: false,
       error: 'Database connection failed',
@@ -236,30 +217,36 @@ const startServer = async () => {
       console.error('Local RAG models could not warm up; readiness remains unavailable.');
     });
 
-    app.listen(PORT, () => {
-      apiLog(`\n🚀 Server is running on port ${PORT}`);
-      apiLog(`📍 API Health: http://localhost:${PORT}/api/health`);
-      apiLog(`📋 Debug log: ${DEBUG_LOG_PATH}\n`);
+    const server = app.listen(PORT, () => {
+      logger.info({ event: 'server_listening', port: PORT });
     });
+    const shutdown = () => {
+      clearInterval(telemetryTimer);
+      eventLoopDelay.disable();
+      server.close(() => {
+        void closeDB().finally(() => {
+          logger.flush();
+          process.exit(0);
+        });
+      });
+    };
+    process.once('SIGTERM', shutdown);
+    process.once('SIGINT', shutdown);
   } catch (error) {
-    console.error('Failed to start server:', error);
+    logger.fatal({ event: 'server_start_failed', error: safeError(error) });
     process.exit(1);
   }
 };
 
 // Handle unhandled promise rejections
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('❌ UNHANDLED PROMISE REJECTION:');
-  console.error('Reason:', reason);
-  console.error('Promise:', promise);
-  console.error('Stack:', reason instanceof Error ? reason.stack : 'No stack trace');
+process.on('unhandledRejection', (reason) => {
+  logger.error({ event: 'unhandled_rejection', error: safeError(reason) });
 });
 
 // Handle uncaught exceptions
 process.on('uncaughtException', (error) => {
-  console.error('❌ UNCAUGHT EXCEPTION:');
-  console.error('Error:', error);
-  console.error('Stack:', error.stack);
+  logger.fatal({ event: 'uncaught_exception', error: safeError(error) });
+  process.exitCode = 1;
 });
 
 startServer();
