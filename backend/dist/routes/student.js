@@ -42,6 +42,7 @@ const auth_1 = require("../middleware/auth");
 const upload_1 = require("../middleware/upload");
 const storage_1 = require("../config/storage");
 const usageLogger_1 = require("../utils/usageLogger");
+const pagination_1 = require("../utils/pagination");
 const router = express_1.default.Router();
 // Apply authentication and authorization to all student routes
 router.use(auth_1.authenticate);
@@ -50,7 +51,16 @@ router.use(auth_1.requireActiveStatus);
 // Get all available courses
 router.get('/courses', async (req, res) => {
     try {
-        const result = await database_1.pool.query(`SELECT c.id, c.title, c.description, c.created_at,
+        let limit, cursor;
+        const scope = `student-courses:${req.user.userId}`;
+        try {
+            limit = (0, pagination_1.parseLimit)(req.query.limit);
+            cursor = (0, pagination_1.decodeCursor)(req.query.cursor, scope);
+        }
+        catch {
+            return res.status(400).json({ error: 'Invalid pagination' });
+        }
+        const result = await database_1.pool.query(`SELECT c.id, c.title, c.title AS cursor_time, c.description, c.created_at,
               u.full_name as instructor_name,
               u.email as instructor_email,
               COUNT(DISTINCT e.id) as enrolled_students_count,
@@ -61,11 +71,15 @@ router.get('/courses', async (req, res) => {
        FROM courses c
        LEFT JOIN users u ON c.instructor_id = u.id
        LEFT JOIN enrollments e ON c.id = e.course_id
+       ${cursor ? 'WHERE (c.title,c.id) > ($2::text,$3::bigint)' : ''}
        GROUP BY c.id, u.id
-       ORDER BY c.title ASC`, [req.user.userId]);
+       ORDER BY c.title ASC,c.id ASC LIMIT $${cursor ? 4 : 2}`, cursor ? [req.user.userId, cursor.at, cursor.id, limit + 1] : [req.user.userId, limit + 1]);
+        const hasMore = result.rows.length > limit;
+        const courses = result.rows.slice(0, limit);
         res.json({
             message: 'Courses retrieved successfully',
-            courses: result.rows
+            items: courses, courses,
+            page: { hasMore, nextCursor: hasMore ? (0, pagination_1.encodeCursor)((0, pagination_1.cursorFromRow)(courses[courses.length - 1], 'cursor_time'), scope) : null }
         });
     }
     catch (error) {
@@ -76,18 +90,31 @@ router.get('/courses', async (req, res) => {
 // Get student's enrolled courses
 router.get('/my-courses', async (req, res) => {
     try {
+        let limit, cursor;
+        const scope = `student-my-courses:${req.user.userId}`;
+        try {
+            limit = (0, pagination_1.parseLimit)(req.query.limit);
+            cursor = (0, pagination_1.decodeCursor)(req.query.cursor, scope);
+        }
+        catch {
+            return res.status(400).json({ error: 'Invalid pagination' });
+        }
         const result = await database_1.pool.query(`SELECT c.id, c.title, c.description, c.created_at,
               u.full_name as instructor_name,
               u.email as instructor_email,
-              e.enrolled_at
+              e.enrolled_at, e.enrolled_at::text AS cursor_time
        FROM enrollments e
        JOIN courses c ON e.course_id = c.id
        LEFT JOIN users u ON c.instructor_id = u.id
        WHERE e.user_id = $1
-       ORDER BY e.enrolled_at DESC`, [req.user.userId]);
+       ${cursor ? 'AND (e.enrolled_at,c.id) < ($2::timestamp,$3::bigint)' : ''}
+       ORDER BY e.enrolled_at DESC,c.id DESC LIMIT $${cursor ? 4 : 2}`, cursor ? [req.user.userId, cursor.at, cursor.id, limit + 1] : [req.user.userId, limit + 1]);
+        const hasMore = result.rows.length > limit;
+        const courses = result.rows.slice(0, limit);
         res.json({
             message: 'Enrolled courses retrieved successfully',
-            courses: result.rows
+            items: courses, courses,
+            page: { hasMore, nextCursor: hasMore ? (0, pagination_1.encodeCursor)((0, pagination_1.cursorFromRow)(courses[courses.length - 1], 'cursor_time'), scope) : null }
         });
     }
     catch (error) {
@@ -152,6 +179,13 @@ router.delete('/courses/:courseId/enroll', async (req, res) => {
 router.get('/courses/:courseId', async (req, res) => {
     try {
         const { courseId } = req.params;
+        let limit;
+        try {
+            limit = (0, pagination_1.parseLimit)(req.query.limit);
+        }
+        catch {
+            return res.status(400).json({ error: 'Invalid pagination' });
+        }
         // Verify student is enrolled in the course
         const enrollment = await database_1.pool.query('SELECT id FROM enrollments WHERE user_id = $1 AND course_id = $2', [req.user.userId, courseId]);
         if (enrollment.rows.length === 0) {
@@ -171,23 +205,32 @@ router.get('/courses/:courseId', async (req, res) => {
             return res.status(404).json({ error: 'Course not found' });
         }
         // Get assignments
-        const assignments = await database_1.pool.query(`SELECT id, title, description, question_text, due_date, points, created_at
+        const assignments = await database_1.pool.query(`SELECT id, title, description, question_text, due_date, points, created_at,
+              COALESCE(due_date,'epoch'::timestamp)::text AS cursor_time
        FROM assignments
        WHERE course_id = $1
-       ORDER BY due_date DESC`, [courseId]);
+       ORDER BY COALESCE(due_date,'epoch'::timestamp) DESC,id DESC LIMIT $2`, [courseId, limit + 1]);
         // Get announcements
-        const announcements = await database_1.pool.query(`SELECT a.id, a.title, a.content, a.created_at,
+        const announcements = await database_1.pool.query(`SELECT a.id, a.title, a.content, a.created_at, a.created_at::text AS cursor_time,
               u.full_name as author_name
        FROM announcements a
        JOIN users u ON a.author_id = u.id
        WHERE a.course_id = $1
-       ORDER BY a.created_at DESC`, [courseId]);
+       ORDER BY a.created_at DESC,a.id DESC LIMIT $2`, [courseId, limit + 1]);
+        const assignmentMore = assignments.rows.length > limit;
+        const assignmentItems = assignments.rows.slice(0, limit);
+        const announcementMore = announcements.rows.length > limit;
+        const announcementItems = announcements.rows.slice(0, limit);
         res.json({
             message: 'Course details retrieved successfully',
             course: {
                 ...course.rows[0],
-                assignments: assignments.rows,
-                announcements: announcements.rows
+                assignments: assignmentItems,
+                announcements: announcementItems,
+                assignmentsPage: { hasMore: assignmentMore, nextCursor: assignmentMore
+                        ? (0, pagination_1.encodeCursor)((0, pagination_1.cursorFromRow)(assignmentItems[assignmentItems.length - 1], 'cursor_time'), `student-assignments:${req.user.userId}:${courseId}`) : null },
+                announcementsPage: { hasMore: announcementMore, nextCursor: announcementMore
+                        ? (0, pagination_1.encodeCursor)((0, pagination_1.cursorFromRow)(announcementItems[announcementItems.length - 1], 'cursor_time'), `student-announcements:${req.user.userId}:${courseId}`) : null }
             }
         });
     }
@@ -200,6 +243,15 @@ router.get('/courses/:courseId', async (req, res) => {
 router.get('/courses/:courseId/assignments', async (req, res) => {
     try {
         const { courseId } = req.params;
+        let limit, cursor;
+        const scope = `student-assignments:${req.user.userId}:${courseId}`;
+        try {
+            limit = (0, pagination_1.parseLimit)(req.query.limit);
+            cursor = (0, pagination_1.decodeCursor)(req.query.cursor, scope);
+        }
+        catch {
+            return res.status(400).json({ error: 'Invalid pagination' });
+        }
         // Verify student is enrolled in the course
         const enrollment = await database_1.pool.query('SELECT id FROM enrollments WHERE user_id = $1 AND course_id = $2', [req.user.userId, courseId]);
         if (enrollment.rows.length === 0) {
@@ -209,14 +261,19 @@ router.get('/courses/:courseId/assignments', async (req, res) => {
             });
         }
         // Get assignments
-        const assignments = await database_1.pool.query(`SELECT id, title, description, question_text, due_date, points, created_at
+        const assignments = await database_1.pool.query(`SELECT id, title, description, question_text, due_date, points, created_at,
+              COALESCE(due_date,'epoch'::timestamp)::text AS cursor_time
        FROM assignments
        WHERE course_id = $1
-       ORDER BY due_date DESC`, [courseId]);
+       ${cursor ? "AND (COALESCE(due_date,'epoch'::timestamp),id) < ($2::timestamp,$3::bigint)" : ''}
+       ORDER BY COALESCE(due_date,'epoch'::timestamp) DESC,id DESC LIMIT $${cursor ? 4 : 2}`, cursor ? [courseId, cursor.at, cursor.id, limit + 1] : [courseId, limit + 1]);
+        const hasMore = assignments.rows.length > limit;
+        const items = assignments.rows.slice(0, limit);
         res.json({
             message: 'Assignments retrieved successfully',
             courseId: courseId,
-            assignments: assignments.rows
+            items, assignments: items,
+            page: { hasMore, nextCursor: hasMore ? (0, pagination_1.encodeCursor)((0, pagination_1.cursorFromRow)(items[items.length - 1], 'cursor_time'), scope) : null }
         });
     }
     catch (error) {
@@ -228,6 +285,15 @@ router.get('/courses/:courseId/assignments', async (req, res) => {
 router.get('/courses/:courseId/announcements', async (req, res) => {
     try {
         const { courseId } = req.params;
+        let limit, cursor;
+        const scope = `student-announcements:${req.user.userId}:${courseId}`;
+        try {
+            limit = (0, pagination_1.parseLimit)(req.query.limit);
+            cursor = (0, pagination_1.decodeCursor)(req.query.cursor, scope);
+        }
+        catch {
+            return res.status(400).json({ error: 'Invalid pagination' });
+        }
         // Verify student is enrolled in the course
         const enrollment = await database_1.pool.query('SELECT id FROM enrollments WHERE user_id = $1 AND course_id = $2', [req.user.userId, courseId]);
         if (enrollment.rows.length === 0) {
@@ -237,16 +303,20 @@ router.get('/courses/:courseId/announcements', async (req, res) => {
             });
         }
         // Get announcements
-        const announcements = await database_1.pool.query(`SELECT a.id, a.title, a.content, a.created_at,
+        const announcements = await database_1.pool.query(`SELECT a.id, a.title, a.content, a.created_at, a.created_at::text AS cursor_time,
               u.full_name as author_name
        FROM announcements a
        JOIN users u ON a.author_id = u.id
        WHERE a.course_id = $1
-       ORDER BY a.created_at DESC`, [courseId]);
+       ${cursor ? 'AND (a.created_at,a.id) < ($2::timestamp,$3::bigint)' : ''}
+       ORDER BY a.created_at DESC,a.id DESC LIMIT $${cursor ? 4 : 2}`, cursor ? [courseId, cursor.at, cursor.id, limit + 1] : [courseId, limit + 1]);
+        const hasMore = announcements.rows.length > limit;
+        const items = announcements.rows.slice(0, limit);
         res.json({
             message: 'Announcements retrieved successfully',
             courseId: courseId,
-            announcements: announcements.rows
+            items, announcements: items,
+            page: { hasMore, nextCursor: hasMore ? (0, pagination_1.encodeCursor)((0, pagination_1.cursorFromRow)(items[items.length - 1], 'cursor_time'), scope) : null }
         });
     }
     catch (error) {
@@ -259,7 +329,20 @@ router.get('/courses/:courseId/announcements', async (req, res) => {
 router.get('/courses/:courseId/folders', async (req, res) => {
     try {
         const { courseId } = req.params;
-        const folderId = req.query.folderId ? parseInt(req.query.folderId) : null;
+        const folderIdParam = req.query.folderId;
+        const folderId = folderIdParam === undefined || folderIdParam === 'null' || folderIdParam === ''
+            ? null : Number(folderIdParam);
+        if (folderId !== null && (!Number.isSafeInteger(folderId) || folderId < 1))
+            return res.status(400).json({ error: 'Invalid folder ID' });
+        let limit, cursor;
+        const scope = `student-folders:${req.user.userId}:${courseId}:${folderId ?? 'root'}`;
+        try {
+            limit = (0, pagination_1.parseLimit)(req.query.limit);
+            cursor = (0, pagination_1.decodeCursor)(req.query.cursor, scope);
+        }
+        catch {
+            return res.status(400).json({ error: 'Invalid pagination' });
+        }
         // Verify student is enrolled
         const enrollment = await database_1.pool.query('SELECT id FROM enrollments WHERE user_id = $1 AND course_id = $2', [req.user.userId, courseId]);
         if (enrollment.rows.length === 0) {
@@ -269,24 +352,31 @@ router.get('/courses/:courseId/folders', async (req, res) => {
         let params;
         if (folderId === null) {
             query = `
-        SELECT mf.id, mf.name, mf.parent_id, mf.created_at
+        SELECT mf.id, mf.name, mf.parent_id, mf.created_at, mf.name AS cursor_time
         FROM material_folders mf
         WHERE mf.course_id = $1 AND mf.parent_id IS NULL
-        ORDER BY mf.name ASC
       `;
             params = [courseId];
         }
         else {
             query = `
-        SELECT mf.id, mf.name, mf.parent_id, mf.created_at
+        SELECT mf.id, mf.name, mf.parent_id, mf.created_at, mf.name AS cursor_time
         FROM material_folders mf
         WHERE mf.course_id = $1 AND mf.parent_id = $2
-        ORDER BY mf.name ASC
       `;
             params = [courseId, folderId];
         }
+        if (cursor) {
+            query += ` AND (mf.name,mf.id) > ($${params.length + 1}::text,$${params.length + 2}::bigint)`;
+            params.push(cursor.at, cursor.id);
+        }
+        query += ` ORDER BY mf.name ASC,mf.id ASC LIMIT $${params.length + 1}`;
+        params.push(limit + 1);
         const result = await database_1.pool.query(query, params);
-        res.json({ folders: result.rows });
+        const hasMore = result.rows.length > limit;
+        const folders = result.rows.slice(0, limit);
+        res.json({ items: folders, folders,
+            page: { hasMore, nextCursor: hasMore ? (0, pagination_1.encodeCursor)((0, pagination_1.cursorFromRow)(folders[folders.length - 1], 'cursor_time'), scope) : null } });
     }
     catch (error) {
         console.error('Error fetching folders:', error);
@@ -325,11 +415,20 @@ router.get('/courses/:courseId/folders/:id/breadcrumb', async (req, res) => {
 router.get('/courses/:courseId/materials', async (req, res) => {
     try {
         const { courseId } = req.params;
+        let limit, cursor;
         const folderIdParam = req.query.folderId;
         const hasFolderFilter = folderIdParam !== undefined;
         const folderId = hasFolderFilter
             ? (folderIdParam === 'null' || folderIdParam === '' ? null : parseInt(folderIdParam))
             : undefined;
+        const scope = `student-materials:${req.user.userId}:${courseId}:${folderIdParam ?? 'all'}`;
+        try {
+            limit = (0, pagination_1.parseLimit)(req.query.limit);
+            cursor = (0, pagination_1.decodeCursor)(req.query.cursor, scope);
+        }
+        catch {
+            return res.status(400).json({ error: 'Invalid pagination' });
+        }
         // Verify student is enrolled in the course
         const enrollment = await database_1.pool.query('SELECT id FROM enrollments WHERE user_id = $1 AND course_id = $2', [req.user.userId, courseId]);
         if (enrollment.rows.length === 0) {
@@ -343,40 +442,46 @@ router.get('/courses/:courseId/materials', async (req, res) => {
         if (!hasFolderFilter) {
             // No filter = all materials (backward compatible)
             query = `
-        SELECT cm.*, u.full_name as uploader_name
+        SELECT cm.*, cm.uploaded_at::text AS cursor_time, u.full_name as uploader_name
         FROM course_materials cm
         JOIN users u ON cm.uploaded_by = u.id
-        WHERE cm.course_id = $1
-        ORDER BY cm.uploaded_at DESC
+        WHERE cm.course_id = $1 AND cm.deleted_at IS NULL AND cm.visibility = 'published'
       `;
             params = [courseId];
         }
         else if (folderId === null) {
             // Root folder
             query = `
-        SELECT cm.*, u.full_name as uploader_name
+        SELECT cm.*, cm.uploaded_at::text AS cursor_time, u.full_name as uploader_name
         FROM course_materials cm
         JOIN users u ON cm.uploaded_by = u.id
-        WHERE cm.course_id = $1 AND cm.folder_id IS NULL
-        ORDER BY cm.uploaded_at DESC
+        WHERE cm.course_id = $1 AND cm.deleted_at IS NULL AND cm.visibility = 'published' AND cm.folder_id IS NULL
       `;
             params = [courseId];
         }
         else {
             // Specific folder
             query = `
-        SELECT cm.*, u.full_name as uploader_name
+        SELECT cm.*, cm.uploaded_at::text AS cursor_time, u.full_name as uploader_name
         FROM course_materials cm
         JOIN users u ON cm.uploaded_by = u.id
-        WHERE cm.course_id = $1 AND cm.folder_id = $2
-        ORDER BY cm.uploaded_at DESC
+        WHERE cm.course_id = $1 AND cm.deleted_at IS NULL AND cm.visibility = 'published' AND cm.folder_id = $2
       `;
             params = [courseId, folderId];
         }
+        if (cursor) {
+            query += ` AND (cm.uploaded_at,cm.id) < ($${params.length + 1}::timestamp,$${params.length + 2}::bigint)`;
+            params.push(cursor.at, cursor.id);
+        }
+        query += ` ORDER BY cm.uploaded_at DESC,cm.id DESC LIMIT $${params.length + 1}`;
+        params.push(limit + 1);
         const result = await database_1.pool.query(query, params);
+        const hasMore = result.rows.length > limit;
+        const materials = result.rows.slice(0, limit);
         res.json({
             message: 'Course materials retrieved successfully',
-            materials: result.rows
+            items: materials, materials,
+            page: { hasMore, nextCursor: hasMore ? (0, pagination_1.encodeCursor)((0, pagination_1.cursorFromRow)(materials[materials.length - 1], 'cursor_time'), scope) : null }
         });
     }
     catch (error) {
@@ -391,7 +496,7 @@ router.get('/materials/:id/download', async (req, res) => {
         // Get material and verify student is enrolled
         const result = await database_1.pool.query(`SELECT cm.* FROM course_materials cm
        JOIN enrollments e ON cm.course_id = e.course_id
-       WHERE cm.id = $1 AND e.user_id = $2`, [id, req.user.userId]);
+       WHERE cm.id = $1 AND e.user_id = $2 AND cm.deleted_at IS NULL AND cm.visibility = 'published'`, [id, req.user.userId]);
         if (result.rows.length === 0) {
             return res.status(404).json({
                 error: 'Material not found or you are not enrolled in this course'
@@ -416,6 +521,15 @@ router.get('/materials/:id/download', async (req, res) => {
 router.get('/assignments/:assignmentId', async (req, res) => {
     try {
         const { assignmentId } = req.params;
+        let limit, filesCursor;
+        const filesScope = `student-assignment-files:${req.user.userId}:${assignmentId}`;
+        try {
+            limit = (0, pagination_1.parseLimit)(req.query.limit);
+            filesCursor = (0, pagination_1.decodeCursor)(req.query.filesCursor, filesScope);
+        }
+        catch {
+            return res.status(400).json({ error: 'Invalid pagination' });
+        }
         // Get assignment details
         const assignmentResult = await database_1.pool.query(`SELECT a.*, c.id as course_id, c.title as course_title
        FROM assignments a
@@ -434,11 +548,12 @@ router.get('/assignments/:assignmentId', async (req, res) => {
             });
         }
         // Get assignment files
-        const filesResult = await database_1.pool.query(`SELECT af.*, u.full_name as uploader_name
+        const filesResult = await database_1.pool.query(`SELECT af.*, af.uploaded_at::text AS cursor_time, u.full_name as uploader_name
        FROM assignment_files af
        JOIN users u ON af.uploaded_by = u.id
        WHERE af.assignment_id = $1
-       ORDER BY af.uploaded_at DESC`, [assignmentId]);
+       ${filesCursor ? 'AND (af.uploaded_at,af.id) < ($2::timestamp,$3::bigint)' : ''}
+       ORDER BY af.uploaded_at DESC,af.id DESC LIMIT $${filesCursor ? 4 : 2}`, filesCursor ? [assignmentId, filesCursor.at, filesCursor.id, limit + 1] : [assignmentId, limit + 1]);
         // Get student's submission if exists
         const submissionResult = await database_1.pool.query(`SELECT asub.*, json_agg(
          json_build_object(
@@ -454,11 +569,15 @@ router.get('/assignments/:assignmentId', async (req, res) => {
        LEFT JOIN submission_files sf ON asub.id = sf.submission_id
        WHERE asub.assignment_id = $1 AND asub.student_id = $2
        GROUP BY asub.id`, [assignmentId, req.user.userId]);
+        const filesMore = filesResult.rows.length > limit;
+        const assignmentFiles = filesResult.rows.slice(0, limit);
         res.json({
             message: 'Assignment details retrieved successfully',
             assignment: {
                 ...assignment,
-                assignmentFiles: filesResult.rows,
+                assignmentFiles,
+                assignmentFilesPage: { hasMore: filesMore, nextCursor: filesMore
+                        ? (0, pagination_1.encodeCursor)((0, pagination_1.cursorFromRow)(assignmentFiles[assignmentFiles.length - 1], 'cursor_time'), filesScope) : null },
                 submission: submissionResult.rows.length > 0 ? submissionResult.rows[0] : null
             }
         });
