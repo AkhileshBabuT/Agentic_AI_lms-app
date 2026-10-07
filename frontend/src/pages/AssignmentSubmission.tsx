@@ -1,11 +1,39 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import type { AxiosResponse } from 'axios';
 import { useParams, Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../components/Toast';
 import { studentAPI, gradingAssistantAPI } from '../services/api';
 import { validateByType } from '../utils/fileValidation';
+import { httpErrorMessage } from '../utils/httpError';
 import type { TentativeGrade } from '../types/agenticai';
 import './AssignmentSubmission.css';
+
+interface AssignmentFile {
+  id: number;
+  file_name: string;
+  file_size: number;
+}
+
+interface AssignmentSubmissionDetails {
+  id: number;
+  grade: number | null;
+  feedback: string | null;
+  submitted_at: string;
+  submission_text: string | null;
+  files: AssignmentFile[] | null;
+}
+
+interface AssignmentDetails {
+  course_id: number;
+  title: string;
+  due_date: string | null;
+  points: number;
+  description: string | null;
+  question_text: string | null;
+  assignmentFiles: AssignmentFile[];
+  submission: AssignmentSubmissionDetails | null;
+}
 
 const AssignmentSubmission: React.FC = () => {
   const { assignmentId } = useParams<{ assignmentId: string }>();
@@ -14,24 +42,42 @@ const AssignmentSubmission: React.FC = () => {
 
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [assignment, setAssignment] = useState<any>(null);
+  const [assignment, setAssignment] = useState<AssignmentDetails | null>(null);
   const [submissionText, setSubmissionText] = useState('');
   const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
   const [tentativeGrade, setTentativeGrade] = useState<TentativeGrade | null>(null);
   const [loadingTentativeGrade, setLoadingTentativeGrade] = useState(false);
   const [showGradeWarningModal, setShowGradeWarningModal] = useState(false);
-  const [hasAcknowledgedWarning, setHasAcknowledgedWarning] = useState(false);
+  const hasAcknowledgedWarning = useRef(false);
 
-  useEffect(() => {
-    if (assignmentId) {
-      loadAssignment();
+  const loadTentativeGrade = useCallback(async (submissionId: number, isActive: () => boolean = () => true) => {
+    try {
+      setLoadingTentativeGrade(true);
+      const response: AxiosResponse<{ tentativeGrade: TentativeGrade | null }> =
+        await gradingAssistantAPI.getTentativeGrade(submissionId);
+      if (!isActive()) return;
+      setTentativeGrade(response.data.tentativeGrade);
+
+      // Show warning modal if this is the first time viewing a tentative grade
+      if (!hasAcknowledgedWarning.current && response.data.tentativeGrade && !response.data.tentativeGrade.is_final) {
+        setShowGradeWarningModal(true);
+      }
+    } catch (error: unknown) {
+      if (!isActive()) return;
+      // Tentative grade might not exist yet, which is okay
+      console.log('No tentative grade yet:', httpErrorMessage(error, 'Tentative grade unavailable'));
+    } finally {
+      if (isActive()) setLoadingTentativeGrade(false);
     }
-  }, [assignmentId]);
+  }, []);
 
-  const loadAssignment = async () => {
+  const loadAssignment = useCallback(async (isActive: () => boolean = () => true) => {
+    if (!assignmentId) return;
     try {
       setLoading(true);
-      const response = await studentAPI.getAssignment(parseInt(assignmentId!));
+      const response: AxiosResponse<{ assignment: AssignmentDetails }> =
+        await studentAPI.getAssignment(Number.parseInt(assignmentId, 10));
+      if (!isActive()) return;
       setAssignment(response.data.assignment);
 
       // If there's already a submission, populate the form and load tentative grade
@@ -39,36 +85,24 @@ const AssignmentSubmission: React.FC = () => {
         setSubmissionText(response.data.assignment.submission.submission_text || '');
         const submissionId = response.data.assignment.submission.id;
         if (submissionId) {
-          loadTentativeGrade(submissionId);
+          void loadTentativeGrade(submissionId, isActive);
         }
       }
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to load assignment', 'error');
+    } catch (error: unknown) {
+      if (isActive()) showToast(httpErrorMessage(error, 'Failed to load assignment'), 'error');
     } finally {
-      setLoading(false);
+      if (isActive()) setLoading(false);
     }
-  };
+  }, [assignmentId, loadTentativeGrade, showToast]);
 
-  const loadTentativeGrade = async (submissionId: number) => {
-    try {
-      setLoadingTentativeGrade(true);
-      const response = await gradingAssistantAPI.getTentativeGrade(submissionId);
-      setTentativeGrade(response.data.tentativeGrade);
-
-      // Show warning modal if this is the first time viewing a tentative grade
-      if (!hasAcknowledgedWarning && response.data.tentativeGrade && !response.data.tentativeGrade.is_final) {
-        setShowGradeWarningModal(true);
-      }
-    } catch (error: any) {
-      // Tentative grade might not exist yet, which is okay
-      console.log('No tentative grade yet:', error.response?.data?.error);
-    } finally {
-      setLoadingTentativeGrade(false);
-    }
-  };
+  useEffect(() => {
+    let active = true;
+    void loadAssignment(() => active);
+    return () => { active = false; };
+  }, [loadAssignment]);
 
   const handleAcknowledgeWarning = () => {
-    setHasAcknowledgedWarning(true);
+    hasAcknowledgedWarning.current = true;
     setShowGradeWarningModal(false);
   };
 
@@ -116,10 +150,10 @@ const AssignmentSubmission: React.FC = () => {
         files: selectedFiles || undefined,
       });
       showToast('Assignment submitted successfully', 'success');
-      loadAssignment(); // Reload to show the updated submission
+      void loadAssignment(); // Reload to show the updated submission
       setSelectedFiles(null); // Reset selected files
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to submit assignment', 'error');
+    } catch (error: unknown) {
+      showToast(httpErrorMessage(error, 'Failed to submit assignment'), 'error');
     } finally {
       setSubmitting(false);
     }
@@ -129,8 +163,8 @@ const AssignmentSubmission: React.FC = () => {
     try {
       const response = await studentAPI.downloadAssignmentFile(fileId);
       window.open(response.data.url, '_blank');
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to download file', 'error');
+    } catch (error: unknown) {
+      showToast(httpErrorMessage(error, 'Failed to download file'), 'error');
     }
   };
 
@@ -195,7 +229,7 @@ const AssignmentSubmission: React.FC = () => {
             <div className="assignment-section">
               <h2>Assignment Files</h2>
               <div className="files-list">
-                {assignment.assignmentFiles.map((file: any) => (
+                {assignment.assignmentFiles.map((file: AssignmentFile) => (
                   <div key={file.id} className="file-item">
                     <span className="file-icon">📄</span>
                     <span className="file-name">{file.file_name}</span>
@@ -346,7 +380,7 @@ const AssignmentSubmission: React.FC = () => {
                   <div className="submitted-files">
                     <h3>Submitted Files:</h3>
                     <div className="files-list">
-                      {submission.files.map((file: any) => (
+                      {submission.files.map((file: AssignmentFile) => (
                         <div key={file.id} className="file-item">
                           <span className="file-icon">📎</span>
                           <span className="file-name">{file.file_name}</span>

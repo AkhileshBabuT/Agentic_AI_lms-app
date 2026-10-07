@@ -58,8 +58,8 @@ const Signup: React.FC = () => {
       } else {
         navigate('/dashboard');
       }
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Signup failed');
     } finally {
       setLoading(false);
     }

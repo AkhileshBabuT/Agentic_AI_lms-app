@@ -12,6 +12,12 @@ import { logUsage } from '../utils/usageLogger';
 
 const router = express.Router();
 
+// Rubrics are private to assigned instructors, including the course owner.
+const instructorAccess = `(c.instructor_id = $2 OR EXISTS (
+  SELECT 1 FROM course_instructors ci WHERE ci.course_id = c.id AND ci.user_id = $2
+))`;
+
+
 /**
  * @route   POST /api/grading-assistant/generate-tentative-grade
  * @desc    Generate tentative grade for a submission
@@ -24,7 +30,7 @@ router.post('/generate-tentative-grade',
   async (req: Request, res: Response): Promise<void> => {
   try {
     const { submissionId } = req.body;
-    const userId = (req as any).user.id;
+    const userId = req.user!.userId;
 
     // Get submission details
     const submissionResult = await pool.query(
@@ -105,24 +111,31 @@ router.post('/generate-tentative-grade',
  * @desc    Get tentative grade for a submission
  * @access  Private (Student or Professor)
  */
-router.get('/tentative-grade/:submissionId', authenticate, async (req: Request, res: Response): Promise<void> => {
+router.get('/tentative-grade/:submissionId', authenticate, validatePositiveInteger('submissionId'), async (req: Request, res: Response): Promise<void> => {
   try {
     const { submissionId } = req.params;
-    const userId = (req as any).user.id;
-    const userRole = (req as any).user.role;
+    const userId = req.user!.userId;
+    const userRole = req.user!.role;
 
-    // Check access rights
-    if (userRole === 'student') {
-      // Students can only view their own tentative grades
-      const submissionCheck = await pool.query(
-        'SELECT student_id FROM assignment_submissions WHERE id = $1',
-        [submissionId]
-      );
-
-      if (submissionCheck.rows.length === 0 || submissionCheck.rows[0].student_id !== userId) {
-        res.status(403).json({ error: 'Access denied' });
-        return;
-      }
+    // A student may read only their own submission; an instructor may read only
+    // submissions for a course they own or have been assigned to teach.
+    if (userRole !== 'student' && userRole !== 'professor') {
+      res.status(403).json({ error: 'Access denied' });
+      return;
+    }
+    const submissionCheck = await pool.query(
+      `SELECT sub.id FROM assignment_submissions sub
+       JOIN assignments a ON a.id = sub.assignment_id
+       JOIN courses c ON c.id = a.course_id
+       WHERE sub.id = $1 AND (
+         ($3 = 'student' AND sub.student_id = $2)
+         OR ($3 = 'professor' AND ${instructorAccess})
+       )`,
+      [submissionId, userId, userRole]
+    );
+    if (submissionCheck.rows.length === 0) {
+      res.status(403).json({ error: 'Access denied' });
+      return;
     }
 
     // Get tentative grade
@@ -152,55 +165,69 @@ router.get('/tentative-grade/:submissionId', authenticate, async (req: Request, 
  * @desc    Finalize a tentative grade (Professor only)
  * @access  Private (Professor)
  */
-router.post('/finalize-grade/:tentativeGradeId', authenticate, async (req: Request, res: Response): Promise<void> => {
+router.post('/finalize-grade/:tentativeGradeId', authenticate,
+  validatePositiveInteger('tentativeGradeId'),
+  async (req: Request, res: Response): Promise<void> => {
+  const { tentativeGradeId } = req.params;
+  const { finalGrade, feedback } = req.body;
+  const userId = req.user!.userId;
+
+  if (req.user!.role !== 'professor') {
+    res.status(403).json({ error: 'Only professors can finalize grades' });
+    return;
+  }
+  if (!Number.isInteger(finalGrade) || finalGrade < 0 || typeof feedback !== 'string') {
+    res.status(400).json({ error: 'Invalid grade or feedback' });
+    return;
+  }
+
+  const client = await pool.connect();
   try {
-    const { tentativeGradeId } = req.params;
-    const { finalGrade, feedback } = req.body;
-    const userId = (req as any).user.id;
-    const userRole = (req as any).user.role;
-
-    if (userRole !== 'professor') {
-      res.status(403).json({ error: 'Only professors can finalize grades' });
-      return;
-    }
-
-    // Get tentative grade details
-    const tentativeResult = await pool.query(
-      'SELECT * FROM tentative_grades WHERE id = $1',
-      [tentativeGradeId]
+    await client.query('BEGIN');
+    // Lock both rows before changing either grade. Course scope is checked on
+    // the actual submission, not on denormalized tentative-grade columns.
+    const tentativeResult = await client.query(
+      `SELECT tg.id, sub.id AS submission_id, a.points
+       FROM tentative_grades tg
+       JOIN assignment_submissions sub ON sub.id = tg.submission_id
+       JOIN assignments a ON a.id = sub.assignment_id
+       JOIN courses c ON c.id = a.course_id
+       WHERE tg.id = $1 AND ${instructorAccess}
+       FOR UPDATE OF tg, sub`,
+      [tentativeGradeId, userId]
     );
-
     if (tentativeResult.rows.length === 0) {
+      await client.query('ROLLBACK');
       res.status(404).json({ error: 'Tentative grade not found' });
       return;
     }
-
     const tentativeGrade = tentativeResult.rows[0];
+    if (finalGrade > tentativeGrade.points) {
+      await client.query('ROLLBACK');
+      res.status(400).json({ error: 'Grade exceeds assignment points' });
+      return;
+    }
 
-    // Update the actual submission with the final grade
-    await pool.query(
+    await client.query(
       `UPDATE assignment_submissions
        SET grade = $1, feedback = $2, graded_at = CURRENT_TIMESTAMP
        WHERE id = $3`,
       [finalGrade, feedback, tentativeGrade.submission_id]
     );
-
-    // Mark tentative grade as finalized
-    await pool.query(
+    await client.query(
       `UPDATE tentative_grades
        SET is_final = true, finalized_at = CURRENT_TIMESTAMP, finalized_by = $1
        WHERE id = $2`,
       [userId, tentativeGradeId]
     );
-
-    res.status(200).json({
-      success: true,
-      message: 'Grade finalized successfully'
-    });
-
-  } catch (error: any) {
+    await client.query('COMMIT');
+    res.status(200).json({ success: true, message: 'Grade finalized successfully' });
+  } catch (error) {
+    await client.query('ROLLBACK');
     console.error('Error finalizing grade:', error);
     res.status(500).json({ error: 'Failed to finalize grade' });
+  } finally {
+    client.release();
   }
 });
 
@@ -218,20 +245,19 @@ router.post('/create-rubric',
   async (req: Request, res: Response): Promise<void> => {
   try {
     const { assignmentId, rubricName, criteria, totalPoints } = req.body;
-    const userId = (req as any).user.id;
-    const userRole = (req as any).user.role;
+    const userId = req.user!.userId;
+    const userRole = req.user!.role;
 
     if (userRole !== 'professor') {
       res.status(403).json({ error: 'Only professors can create rubrics' });
       return;
     }
 
-    // Verify the professor owns this assignment
     const assignmentResult = await pool.query(
       `SELECT a.course_id
        FROM assignments a
        JOIN courses c ON a.course_id = c.id
-       WHERE a.id = $1 AND c.instructor_id = $2`,
+       WHERE a.id = $1 AND ${instructorAccess}`,
       [assignmentId, userId]
     );
 
@@ -264,28 +290,32 @@ router.post('/create-rubric',
 /**
  * @route   GET /api/grading-assistant/rubric/:assignmentId
  * @desc    Get rubric for an assignment
- * @access  Private
+ * @access  Private (Professor assigned to course)
  */
-router.get('/rubric/:assignmentId', authenticate, async (req: Request, res: Response): Promise<void> => {
+router.get('/rubric/:assignmentId', authenticate,
+  validatePositiveInteger('assignmentId'),
+  async (req: Request, res: Response): Promise<void> => {
   try {
     const { assignmentId } = req.params;
+    if (req.user!.role !== 'professor') {
+      res.status(403).json({ error: 'Only professors can view rubrics' });
+      return;
+    }
 
     const result = await pool.query(
-      'SELECT * FROM grading_rubrics WHERE assignment_id = $1',
-      [assignmentId]
+      `SELECT r.* FROM grading_rubrics r
+       JOIN assignments a ON a.id = r.assignment_id
+       JOIN courses c ON c.id = a.course_id
+       WHERE a.id = $1 AND ${instructorAccess}`,
+      [assignmentId, req.user!.userId]
     );
-
     if (result.rows.length === 0) {
       res.status(404).json({ error: 'No rubric found for this assignment' });
       return;
     }
 
-    res.status(200).json({
-      success: true,
-      rubric: result.rows[0]
-    });
-
-  } catch (error: any) {
+    res.status(200).json({ success: true, rubric: result.rows[0] });
+  } catch (error) {
     console.error('Error fetching rubric:', error);
     res.status(500).json({ error: 'Failed to fetch rubric' });
   }

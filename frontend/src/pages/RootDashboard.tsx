@@ -1,9 +1,12 @@
-import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useEffect, useCallback } from 'react';
+import axios from 'axios';
+import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../components/Toast';
 import { rootAPI, usageAPI } from '../services/api';
 import MaterialIndexStatus from '../components/MaterialIndexStatus';
+import type { MaterialIndexState } from '../types/rag';
+import { RootOverview } from '../features/dashboard/RootOverview';
 import './RootDashboard.css';
 
 interface PendingProfessor {
@@ -53,13 +56,30 @@ interface Stats {
   totalEnrollments: number;
   pendingProfessors: number;
 }
+interface CursorPage { hasMore: boolean; nextCursor: string | null }
+type PaginatedList = 'pending' | 'users' | 'courses' | 'professors' | 'materials' | 'submissions';
+interface RootMaterial extends MaterialIndexState { id: number; file_name: string; file_size: number; course_title: string; uploader_name: string; uploaded_at: string }
+interface RootSubmission { id: number; student_name: string; assignment_title: string; course_title: string; files?: unknown[]; grade: number | null; submitted_at: string }
+interface RootFileStats { courseMaterials: { count: number; totalSize: number }; submissions: { count: number }; submissionFiles: { count: number; totalSize: number } }
+interface UsageSummary { user_id: number; full_name: string; email: string; role: string; file_uploads: number; llm_requests: number; grading_requests: number; total_actions: number; last_activity: string | null }
+interface UsageStats { total_file_uploads: number; total_llm_requests: number; total_grading_requests: number; total_actions: number; unique_users: number }
+interface UsageLog { id: number; created_at: string; full_name: string; role: string; action_type: string; endpoint: string; metadata?: { fileName?: string; responseLength?: number; confidence?: number } }
+
+function apiErrorMessage(error: unknown, fallback: string): string {
+  return axios.isAxiosError<{ error?: string }>(error) ? error.response?.data?.error || fallback : fallback;
+}
 
 const RootDashboard: React.FC = () => {
-  const { user, logout } = useAuth();
+  const { user } = useAuth();
   const { showToast } = useToast();
-  const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<'overview' | 'pending' | 'professors' | 'users' | 'courses' | 'files' | 'usage'>('overview');
+  const [searchParams, setSearchParams] = useSearchParams();
+  type RootTab = 'overview' | 'pending' | 'professors' | 'users' | 'courses' | 'files' | 'usage';
+  const requestedTab = searchParams.get('view');
+  const activeTab: RootTab = requestedTab === 'pending' || requestedTab === 'professors' || requestedTab === 'users' || requestedTab === 'courses' || requestedTab === 'files' || requestedTab === 'usage' ? requestedTab : 'overview';
+  const setActiveTab = (next: RootTab) => setSearchParams(next === 'overview' ? {} : { view: next });
   const [loading, setLoading] = useState(false);
+  const [pages, setPages] = useState<Partial<Record<PaginatedList, CursorPage>>>({});
+  const rememberPage = useCallback((key: PaginatedList, page?: CursorPage) => setPages(previous => ({ ...previous, [key]: page ?? { hasMore: false, nextCursor: null } })), []);
 
   // State
   const [stats, setStats] = useState<Stats | null>(null);
@@ -67,12 +87,12 @@ const RootDashboard: React.FC = () => {
   const [professors, setProfessors] = useState<Professor[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [courses, setCourses] = useState<Course[]>([]);
-  const [materials, setMaterials] = useState<any[]>([]);
-  const [submissions, setSubmissions] = useState<any[]>([]);
-  const [fileStats, setFileStats] = useState<any>(null);
-  const [usageSummary, setUsageSummary] = useState<any[]>([]);
-  const [usageStats, setUsageStats] = useState<any>(null);
-  const [usageLogs, setUsageLogs] = useState<any[]>([]);
+  const [materials, setMaterials] = useState<RootMaterial[]>([]);
+  const [submissions, setSubmissions] = useState<RootSubmission[]>([]);
+  const [fileStats, setFileStats] = useState<RootFileStats | null>(null);
+  const [usageSummary, setUsageSummary] = useState<UsageSummary[]>([]);
+  const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
+  const [usageLogs, setUsageLogs] = useState<UsageLog[]>([]);
   const [usageFilter, setUsageFilter] = useState<string>('');
   const [usageView, setUsageView] = useState<'summary' | 'logs'>('summary');
 
@@ -85,63 +105,56 @@ const RootDashboard: React.FC = () => {
   const [selectedProfessor, setSelectedProfessor] = useState<Professor | null>(null);
   const [selectedCourseId, setSelectedCourseId] = useState<string>('');
 
-  useEffect(() => {
-    if (activeTab === 'overview') loadStats();
-    if (activeTab === 'pending') loadPendingProfessors();
-    if (activeTab === 'professors') loadProfessors();
-    if (activeTab === 'users') loadUsers();
-    if (activeTab === 'courses') loadCourses();
-    if (activeTab === 'files') loadFiles();
-    if (activeTab === 'usage') loadUsage();
-  }, [activeTab]);
-
-  const loadStats = async () => {
+  const loadStats = useCallback(async () => {
     try {
       setLoading(true);
       const response = await rootAPI.getStats();
       setStats(response.data.stats);
-    } catch (error) {
+    } catch {
       showToast('Failed to load statistics', 'error');
     } finally {
       setLoading(false);
     }
-  };
+  }, [showToast]);
 
-  const loadPendingProfessors = async () => {
+  const loadPendingProfessors = useCallback(async (cursor?: string) => {
     try {
       setLoading(true);
-      const response = await rootAPI.getPendingProfessors();
-      setPendingProfessors(response.data.professors);
-    } catch (error) {
+      const response = await rootAPI.getPendingProfessors({ limit: 20, cursor });
+      setPendingProfessors(previous => cursor ? [...previous, ...response.data.professors] : response.data.professors);
+      rememberPage('pending', response.data.page);
+    } catch {
       showToast('Failed to load pending professors', 'error');
     } finally {
       setLoading(false);
     }
-  };
+  }, [rememberPage, showToast]);
 
-  const loadUsers = async () => {
+  const loadUsers = useCallback(async (cursor?: string) => {
     try {
       setLoading(true);
-      const response = await rootAPI.getUsers();
-      setUsers(response.data.users);
-    } catch (error) {
+      const response = await rootAPI.getUsers({ limit: 20, cursor });
+      setUsers(previous => cursor ? [...previous, ...response.data.users] : response.data.users);
+      rememberPage('users', response.data.page);
+    } catch {
       showToast('Failed to load users', 'error');
     } finally {
       setLoading(false);
     }
-  };
+  }, [rememberPage, showToast]);
 
-  const loadCourses = async () => {
+  const loadCourses = useCallback(async (cursor?: string) => {
     try {
       setLoading(true);
-      const response = await rootAPI.getCourses();
-      setCourses(response.data.courses);
-    } catch (error) {
+      const response = await rootAPI.getCourses({ limit: 20, cursor });
+      setCourses(previous => cursor ? [...previous, ...response.data.courses] : response.data.courses);
+      rememberPage('courses', response.data.page);
+    } catch {
       showToast('Failed to load courses', 'error');
     } finally {
       setLoading(false);
     }
-  };
+  }, [rememberPage, showToast]);
 
   const handleApproveProfessor = async (professorId: number, status: 'approved' | 'rejected') => {
     if (!confirm(`Are you sure you want to ${status === 'approved' ? 'approve' : 'reject'} this professor?`)) {
@@ -153,8 +166,8 @@ const RootDashboard: React.FC = () => {
       showToast(`Professor ${status} successfully`, 'success');
       loadPendingProfessors();
       loadStats(); // Always refresh stats to update the badge count
-    } catch (error: any) {
-      showToast(error.response?.data?.error || `Failed to ${status} professor`, 'error');
+    } catch (error: unknown) {
+      showToast(apiErrorMessage(error, `Failed to ${status} professor`), 'error');
     }
   };
 
@@ -167,8 +180,8 @@ const RootDashboard: React.FC = () => {
       await rootAPI.deleteUser(userId);
       showToast('User deleted successfully', 'success');
       loadUsers();
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to delete user', 'error');
+    } catch (error: unknown) {
+      showToast(apiErrorMessage(error, 'Failed to delete user'), 'error');
     }
   };
 
@@ -180,8 +193,8 @@ const RootDashboard: React.FC = () => {
       setNewCourse({ title: '', description: '' });
       setShowAddCourse(false);
       loadCourses();
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to create course', 'error');
+    } catch (error: unknown) {
+      showToast(apiErrorMessage(error, 'Failed to create course'), 'error');
     }
   };
 
@@ -194,22 +207,23 @@ const RootDashboard: React.FC = () => {
       await rootAPI.deleteCourse(courseId);
       showToast('Course deleted successfully', 'success');
       loadCourses();
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to delete course', 'error');
+    } catch (error: unknown) {
+      showToast(apiErrorMessage(error, 'Failed to delete course'), 'error');
     }
   };
 
-  const loadProfessors = async () => {
+  const loadProfessors = useCallback(async (cursor?: string) => {
     try {
       setLoading(true);
-      const response = await rootAPI.getProfessors();
-      setProfessors(response.data.professors);
-    } catch (error) {
+      const response = await rootAPI.getProfessors({ limit: 20, cursor });
+      setProfessors(previous => cursor ? [...previous, ...response.data.professors] : response.data.professors);
+      rememberPage('professors', response.data.page);
+    } catch {
       showToast('Failed to load professors', 'error');
     } finally {
       setLoading(false);
     }
-  };
+  }, [rememberPage, showToast]);
 
   const handleAssignCourse = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -222,8 +236,8 @@ const RootDashboard: React.FC = () => {
       setSelectedProfessor(null);
       setSelectedCourseId('');
       loadProfessors();
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to assign course', 'error');
+    } catch (error: unknown) {
+      showToast(apiErrorMessage(error, 'Failed to assign course'), 'error');
     }
   };
 
@@ -236,8 +250,8 @@ const RootDashboard: React.FC = () => {
       await rootAPI.removeCourse(professorId, courseId);
       showToast('Course removed successfully', 'success');
       loadProfessors();
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to remove course', 'error');
+    } catch (error: unknown) {
+      showToast(apiErrorMessage(error, 'Failed to remove course'), 'error');
     }
   };
 
@@ -250,8 +264,8 @@ const RootDashboard: React.FC = () => {
       await rootAPI.deleteProfessor(professorId);
       showToast('Professor deleted successfully', 'success');
       loadProfessors();
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to delete professor', 'error');
+    } catch (error: unknown) {
+      showToast(apiErrorMessage(error, 'Failed to delete professor'), 'error');
     }
   };
 
@@ -259,18 +273,25 @@ const RootDashboard: React.FC = () => {
     setSelectedProfessor(professor);
     setSelectedCourseId('');
     setShowAssignCourse(true);
-    // Load courses if not already loaded
-    if (courses.length === 0) {
+    // The picker needs every eligible course, including later cursor pages.
+    if (courses.length === 0 || pages.courses?.hasMore) {
       try {
-        const response = await rootAPI.getCourses();
-        setCourses(response.data.courses);
-      } catch (error) {
+        const allCourses: Course[] = [];
+        let cursor: string | undefined;
+        for (let page = 0; page < 5; page += 1) {
+          const response = await rootAPI.getCourses({ limit: 100, cursor });
+          allCourses.push(...response.data.courses);
+          cursor = response.data.page?.nextCursor ?? undefined;
+          if (!response.data.page?.hasMore || !cursor) break;
+        }
+        setCourses(allCourses);
+      } catch {
         showToast('Failed to load courses', 'error');
       }
     }
   };
 
-  const loadFiles = async () => {
+  const loadFiles = useCallback(async () => {
     try {
       setLoading(true);
       const [materialsRes, submissionsRes, statsRes] = await Promise.all([
@@ -282,14 +303,35 @@ const RootDashboard: React.FC = () => {
       setMaterials(materialsRes.data.materials || []);
       setSubmissions(submissionsRes.data.submissions || []);
       setFileStats(statsRes.data.stats);
-    } catch (error) {
+      rememberPage('materials', materialsRes.data.page);
+      rememberPage('submissions', submissionsRes.data.page);
+    } catch {
       showToast('Failed to load file data', 'error');
     } finally {
       setLoading(false);
     }
+  }, [rememberPage, showToast]);
+
+  const loadMoreFiles = async (kind: 'materials' | 'submissions') => {
+    const cursor = pages[kind]?.nextCursor;
+    if (!cursor) return;
+    try {
+      setLoading(true);
+      if (kind === 'materials') {
+        const response = await rootAPI.getAllMaterials({ limit: 20, cursor });
+        setMaterials(previous => [...previous, ...(response.data.materials || [])]);
+        rememberPage(kind, response.data.page);
+      } else {
+        const response = await rootAPI.getAllSubmissions({ limit: 20, cursor });
+        setSubmissions(previous => [...previous, ...(response.data.submissions || [])]);
+        rememberPage(kind, response.data.page);
+      }
+    } catch {
+      showToast('Could not load more records', 'error');
+    } finally { setLoading(false); }
   };
 
-  const loadUsage = async () => {
+  const loadUsage = useCallback(async () => {
     try {
       setLoading(true);
       const params = usageFilter ? { actionType: usageFilter } : undefined;
@@ -301,12 +343,22 @@ const RootDashboard: React.FC = () => {
       setUsageSummary(summaryRes.data.summary || []);
       setUsageStats(statsRes.data.stats || null);
       setUsageLogs(logsRes.data.logs || []);
-    } catch (error) {
+    } catch {
       showToast('Failed to load usage data', 'error');
     } finally {
       setLoading(false);
     }
-  };
+  }, [showToast, usageFilter]);
+
+  useEffect(() => {
+    if (activeTab === 'overview') void loadStats();
+    if (activeTab === 'pending') void loadPendingProfessors();
+    if (activeTab === 'professors') void loadProfessors();
+    if (activeTab === 'users') void loadUsers();
+    if (activeTab === 'courses') void loadCourses();
+    if (activeTab === 'files') void loadFiles();
+    if (activeTab === 'usage') void loadUsage();
+  }, [activeTab, loadStats, loadPendingProfessors, loadProfessors, loadUsers, loadCourses, loadFiles, loadUsage]);
 
   const formatFileSize = (bytes: number) => {
     if (bytes < 1024) return bytes + ' B';
@@ -318,38 +370,34 @@ const RootDashboard: React.FC = () => {
     try {
       const response = await rootAPI.downloadFile(type, fileId);
       window.open(response.data.url, '_blank');
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to download file', 'error');
+    } catch (error: unknown) {
+      showToast(apiErrorMessage(error, 'Failed to download file'), 'error');
     }
   };
 
   return (
     <div className="root-dashboard">
-      <header className="dashboard-header">
+      <header className="dashboard-header dashboard-header--workspace">
         <div className="header-content">
           <div>
-            <h1>Root Dashboard</h1>
-            <p>Welcome, {user?.fullName}</p>
-          </div>
-          <div className="header-actions">
-            <button onClick={() => navigate('/ai-agent-hub')} className="ai-hub-button">
-              🤖 AI Agent Hub
-            </button>
-            <button onClick={logout} className="logout-button">
-              Logout
-            </button>
+            <h1>Administration workspace</h1>
+            <p>Welcome, {user?.fullName}. Review access, staffing, and system activity.</p>
           </div>
         </div>
       </header>
 
-      <div className="dashboard-tabs">
+      <nav aria-label="Administration sections" className="dashboard-tabs">
         <button
+          type="button"
+          aria-current={activeTab === 'overview' ? 'page' : undefined}
           className={`tab ${activeTab === 'overview' ? 'active' : ''}`}
           onClick={() => setActiveTab('overview')}
         >
           Overview
         </button>
         <button
+          type="button"
+          aria-current={activeTab === 'pending' ? 'page' : undefined}
           className={`tab ${activeTab === 'pending' ? 'active' : ''}`}
           onClick={() => setActiveTab('pending')}
         >
@@ -359,76 +407,52 @@ const RootDashboard: React.FC = () => {
           )}
         </button>
         <button
+          type="button"
+          aria-current={activeTab === 'professors' ? 'page' : undefined}
           className={`tab ${activeTab === 'professors' ? 'active' : ''}`}
           onClick={() => setActiveTab('professors')}
         >
           Manage Professors
         </button>
         <button
+          type="button"
+          aria-current={activeTab === 'users' ? 'page' : undefined}
           className={`tab ${activeTab === 'users' ? 'active' : ''}`}
           onClick={() => setActiveTab('users')}
         >
           Users
         </button>
         <button
+          type="button"
+          aria-current={activeTab === 'courses' ? 'page' : undefined}
           className={`tab ${activeTab === 'courses' ? 'active' : ''}`}
           onClick={() => setActiveTab('courses')}
         >
           Courses
         </button>
         <button
+          type="button"
+          aria-current={activeTab === 'files' ? 'page' : undefined}
           className={`tab ${activeTab === 'files' ? 'active' : ''}`}
           onClick={() => setActiveTab('files')}
         >
           Files
         </button>
         <button
+          type="button"
+          aria-current={activeTab === 'usage' ? 'page' : undefined}
           className={`tab ${activeTab === 'usage' ? 'active' : ''}`}
           onClick={() => setActiveTab('usage')}
         >
           Usage Logs
         </button>
-      </div>
+      </nav>
 
       <main className="dashboard-main">
-        {loading && <div className="loading">Loading...</div>}
+        {loading && activeTab !== 'overview' && <div className="loading" role="status">Loading...</div>}
 
         {/* Overview Tab */}
-        {activeTab === 'overview' && stats && (
-          <div className="overview-section">
-            <h2>System Statistics</h2>
-            <div className="stats-grid">
-              <div className="stat-card">
-                <h3>{stats.users.student || 0}</h3>
-                <p>Students</p>
-              </div>
-              <div className="stat-card">
-                <h3>{stats.users.professor || 0}</h3>
-                <p>Professors</p>
-              </div>
-              <div className="stat-card">
-                <h3>{stats.totalCourses}</h3>
-                <p>Total Courses</p>
-              </div>
-              <div className="stat-card">
-                <h3>{stats.totalEnrollments}</h3>
-                <p>Total Enrollments</p>
-              </div>
-              <div className="stat-card highlight">
-                <h3>{stats.pendingProfessors}</h3>
-                <p>Pending Approvals</p>
-              </div>
-            </div>
-
-            <div className="settings-card">
-              <h3>Course answer sources</h3>
-              <p>
-                Course answers use authorized, indexed course materials and include supporting document references.
-                Questions without enough document evidence receive an explanation of what is missing.
-              </p>
-            </div>
-          </div>
-        )}
+        {activeTab === 'overview' && <RootOverview stats={stats} onTab={setActiveTab} />}
 
         {/* Pending Professors Tab */}
         {activeTab === 'pending' && (
@@ -846,11 +870,7 @@ const RootDashboard: React.FC = () => {
               <div className="usage-controls">
                 <select
                   value={usageFilter}
-                  onChange={(e) => {
-                    setUsageFilter(e.target.value);
-                    // Reload with new filter after state update
-                    setTimeout(() => loadUsage(), 0);
-                  }}
+                  onChange={(e) => setUsageFilter(e.target.value)}
                   className="usage-filter-select"
                   title="Filter by action type"
                 >
@@ -925,7 +945,7 @@ const RootDashboard: React.FC = () => {
                         </tr>
                       </thead>
                       <tbody>
-                        {usageSummary.map((row: any) => (
+                        {usageSummary.map((row) => (
                           <tr key={row.user_id}>
                             <td>
                               <div>{row.full_name}</div>
@@ -967,7 +987,7 @@ const RootDashboard: React.FC = () => {
                         </tr>
                       </thead>
                       <tbody>
-                        {usageLogs.map((log: any) => (
+                        {usageLogs.map((log) => (
                           <tr key={log.id}>
                             <td>{new Date(log.created_at).toLocaleString()}</td>
                             <td>
@@ -995,6 +1015,17 @@ const RootDashboard: React.FC = () => {
             )}
           </div>
         )}
+        {(['pending', 'professors', 'users', 'courses'] as const).includes(activeTab as 'pending' | 'professors' | 'users' | 'courses') && pages[activeTab as PaginatedList]?.hasMore && (
+          <button type="button" className="btn-secondary" disabled={loading} onClick={() => {
+            const cursor = pages[activeTab as PaginatedList]?.nextCursor;
+            if (!cursor) return;
+            if (activeTab === 'pending') void loadPendingProfessors(cursor);
+            if (activeTab === 'professors') void loadProfessors(cursor);
+            if (activeTab === 'users') void loadUsers(cursor);
+            if (activeTab === 'courses') void loadCourses(cursor);
+          }}>Load more {activeTab}</button>
+        )}
+        {activeTab === 'files' && <div className="dashboard-load-more">{pages.materials?.hasMore && <button type="button" className="btn-secondary" disabled={loading} onClick={() => void loadMoreFiles('materials')}>Load more materials</button>}{pages.submissions?.hasMore && <button type="button" className="btn-secondary" disabled={loading} onClick={() => void loadMoreFiles('submissions')}>Load more submissions</button>}</div>}
       </main>
     </div>
   );

@@ -60,6 +60,9 @@ export async function runMigrations(): Promise<void> {
     // Migration 9: immutable evidence and assistant-owned course-answer citations.
     await client.query(fs.readFileSync(path.join(__dirname, 'rag-answers-schema.sql'), 'utf8'));
 
+    // Migration 10: idempotent streamed chat request claims.
+    await client.query(fs.readFileSync(path.join(__dirname, 'chat-stream-idempotency.sql'), 'utf8'));
+
   } catch (error) {
     console.error('Error running migrations:', error);
     throw error;

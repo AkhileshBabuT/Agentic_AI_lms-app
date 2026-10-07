@@ -1,121 +1,213 @@
-import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import axios from 'axios';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../components/Toast';
 import { professorAPI } from '../services/api';
-import { validateByType } from '../utils/fileValidation';
+import { getAcceptAttribute, validateByType } from '../utils/fileValidation';
 import MaterialIndexStatus from '../components/MaterialIndexStatus';
+import type { MaterialIndexState } from '../types/rag';
+import { ProfessorOverview } from '../features/dashboard/ProfessorOverview';
 import './ProfessorDashboard.css';
+
+interface ProfessorCourse { title: string; description?: string; enrolled_students_count: number }
+interface EnrolledStudent { id: number; full_name: string; email: string; enrolled_at: string }
+interface CourseMaterial extends MaterialIndexState { id: number; file_name: string; file_size: number; uploaded_at: string }
+interface CourseAssignment { id: number; title: string; description: string; due_date: string | null; points: number }
+interface CourseAnnouncement { id: number; title: string; content: string; created_at: string }
+interface MaterialFolder { id: number; name: string; created_at: string }
+interface FolderCrumb { id: number; name: string }
+
+function apiErrorMessage(error: unknown, fallback: string): string {
+  return axios.isAxiosError<{ error?: string }>(error) ? error.response?.data?.error || fallback : fallback;
+}
 
 const ProfessorDashboard: React.FC = () => {
   const { user, logout } = useAuth();
   const { showToast } = useToast();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<'overview' | 'students' | 'materials' | 'assignments' | 'announcements'>('overview');
+  const [searchParams, setSearchParams] = useSearchParams();
+  type ProfessorTab = 'overview' | 'students' | 'materials' | 'assignments' | 'announcements';
+  const requestedTab = searchParams.get('view');
+  const activeTab: ProfessorTab = requestedTab === 'students' || requestedTab === 'materials' || requestedTab === 'assignments' || requestedTab === 'announcements' ? requestedTab : 'overview';
+  const setActiveTab = (next: ProfessorTab) => setSearchParams(next === 'overview' ? {} : { view: next });
   const [loading, setLoading] = useState(false);
+  const [studentPage, setStudentPage] = useState<{ hasMore: boolean; nextCursor: string | null } | null>(null);
+  const [materialPage, setMaterialPage] = useState<{ hasMore: boolean; nextCursor: string | null } | null>(null);
+  const [folderPage, setFolderPage] = useState<{ hasMore: boolean; nextCursor: string | null } | null>(null);
+  const [assignmentPage, setAssignmentPage] = useState<{ hasMore: boolean; nextCursor: string | null } | null>(null);
+  const [announcementPage, setAnnouncementPage] = useState<{ hasMore: boolean; nextCursor: string | null } | null>(null);
+  const materialCursors = useRef<(string | undefined)[]>([undefined]);
+  const [courseLoading, setCourseLoading] = useState(true);
+  const [courseError, setCourseError] = useState(false);
 
-  const [course, setCourse] = useState<any>(null);
-  const [students, setStudents] = useState<any[]>([]);
-  const [materials, setMaterials] = useState<any[]>([]);
-  const [assignments, setAssignments] = useState<any[]>([]);
-  const [announcements, setAnnouncements] = useState<any[]>([]);
+  const [course, setCourse] = useState<ProfessorCourse | null>(null);
+  const [students, setStudents] = useState<EnrolledStudent[]>([]);
+  const [materials, setMaterials] = useState<CourseMaterial[]>([]);
+  const [assignments, setAssignments] = useState<CourseAssignment[]>([]);
+  const [announcements, setAnnouncements] = useState<CourseAnnouncement[]>([]);
 
   const [showAddAssignment, setShowAddAssignment] = useState(false);
   const [showAddAnnouncement, setShowAddAnnouncement] = useState(false);
   const [uploadingFiles, setUploadingFiles] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<Array<{ key: string; name: string; percent: number; state: 'uploading' | 'queued' | 'error'; error?: string }>>([]);
+  const [dragActive, setDragActive] = useState(false);
   const [newAssignment, setNewAssignment] = useState({ title: '', description: '', questionText: '', dueDate: '', points: 100 });
   const [newAnnouncement, setNewAnnouncement] = useState({ title: '', content: '' });
 
   // Folder navigation state
   const [currentFolderId, setCurrentFolderId] = useState<number | null>(null);
-  const [folders, setFolders] = useState<any[]>([]);
-  const [breadcrumb, setBreadcrumb] = useState<any[]>([]);
+  const [folders, setFolders] = useState<MaterialFolder[]>([]);
+  const [breadcrumb, setBreadcrumb] = useState<FolderCrumb[]>([]);
   const [showCreateFolder, setShowCreateFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [retryingMaterialId, setRetryingMaterialId] = useState<number | null>(null);
+  const pollAttempt = useRef(0);
+  const activeMaterialIds = materials.filter(material => ['uploading', 'queued', 'processing', 'retrying'].includes(material.ingestion_status ?? '')).map(material => material.id).join(',');
 
   useEffect(() => {
-    loadCourse();
-  }, []);
-
-  useEffect(() => {
-    if (activeTab === 'students') loadStudents();
-    if (activeTab === 'assignments') loadAssignments();
-    if (activeTab === 'announcements') loadAnnouncements();
-  }, [activeTab]);
-
-  useEffect(() => {
-    if (activeTab === 'materials') loadMaterials();
+    pollAttempt.current = 0;
   }, [activeTab, currentFolderId]);
 
-  const loadCourse = async () => {
+  useEffect(() => {
+    if (activeTab !== 'materials' || !activeMaterialIds) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
+    const schedule = () => {
+      if (cancelled || document.visibilityState === 'hidden') return;
+      const delay = Math.min(30000, 3000 * 2 ** Math.min(pollAttempt.current, 4));
+      timer = setTimeout(async () => {
+        if (cancelled || document.visibilityState === 'hidden') return;
+        try {
+          const responses = await Promise.all(materialCursors.current.map(cursor => professorAPI.getMaterials(currentFolderId, { limit: 20, cursor })));
+          if (!cancelled) setMaterials(responses.flatMap(response => response.data.materials));
+        } catch {
+          // Keep the last known state; retry with bounded backoff while active.
+        }
+        pollAttempt.current += 1;
+        schedule();
+      }, delay);
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        if (timer) clearTimeout(timer);
+        timer = undefined;
+      } else {
+        pollAttempt.current = 0;
+        schedule();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    schedule();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [activeTab, activeMaterialIds, currentFolderId]);
+
+  const loadCourse = useCallback(async () => {
     try {
+      setCourseLoading(true);
+      setCourseError(false);
       const response = await professorAPI.getCourse();
       setCourse(response.data.course);
-    } catch (error) {
+    } catch {
+      setCourseError(true);
       showToast('Failed to load course', 'error');
+    } finally {
+      setCourseLoading(false);
     }
-  };
+  }, [showToast]);
 
-  const loadStudents = async () => {
+  const loadStudents = useCallback(async (cursor?: string) => {
     try {
       setLoading(true);
-      const response = await professorAPI.getStudents();
-      setStudents(response.data.students);
-    } catch (error) {
+      const response = await professorAPI.getStudents({ limit: 20, cursor });
+      setStudents(previous => cursor ? [...previous, ...response.data.students] : response.data.students);
+      setStudentPage(response.data.page ?? null);
+    } catch {
       showToast('Failed to load students', 'error');
     } finally {
       setLoading(false);
     }
-  };
+  }, [showToast]);
 
-  const loadAssignments = async () => {
+  const loadAssignments = useCallback(async (cursor?: string) => {
     try {
       setLoading(true);
-      const response = await professorAPI.getAssignments();
-      setAssignments(response.data.assignments);
-    } catch (error) {
+      const response = await professorAPI.getAssignments({ limit: 20, cursor });
+      setAssignments(previous => cursor ? [...previous, ...response.data.assignments] : response.data.assignments);
+      setAssignmentPage(response.data.page ?? null);
+    } catch {
       showToast('Failed to load assignments', 'error');
     } finally {
       setLoading(false);
     }
-  };
+  }, [showToast]);
 
-  const loadMaterials = async () => {
+  const loadMaterials = useCallback(async (cursor?: string) => {
     try {
       setLoading(true);
-      const [materialsRes, foldersRes] = await Promise.all([
-        professorAPI.getMaterials(currentFolderId === null ? null : currentFolderId),
-        professorAPI.getFolders(currentFolderId),
+      const [materialsRes, foldersRes, breadcrumbRes] = await Promise.all([
+        professorAPI.getMaterials(currentFolderId === null ? null : currentFolderId, { limit: 20, cursor }),
+        cursor ? Promise.resolve(null) : professorAPI.getFolders(currentFolderId, { limit: 20 }),
+        cursor || currentFolderId === null ? Promise.resolve(null) : professorAPI.getFolderBreadcrumb(currentFolderId),
       ]);
-      setMaterials(materialsRes.data.materials);
-      setFolders(foldersRes.data.folders);
-
-      if (currentFolderId !== null) {
-        const breadcrumbRes = await professorAPI.getFolderBreadcrumb(currentFolderId);
-        setBreadcrumb(breadcrumbRes.data.breadcrumb);
-      } else {
-        setBreadcrumb([]);
+      setMaterials(previous => cursor ? [...previous, ...materialsRes.data.materials] : materialsRes.data.materials);
+      setMaterialPage(materialsRes.data.page ?? null);
+      if (cursor) materialCursors.current.push(cursor);
+      else materialCursors.current = [undefined];
+      if (foldersRes) {
+        setFolders(foldersRes.data.folders);
+        setFolderPage(foldersRes.data.page ?? null);
       }
-    } catch (error) {
+      if (!cursor) setBreadcrumb(breadcrumbRes?.data.breadcrumb ?? []);
+    } catch {
       showToast('Failed to load course materials', 'error');
     } finally {
       setLoading(false);
     }
-  };
+  }, [currentFolderId, showToast]);
 
-  const loadAnnouncements = async () => {
+  const loadAnnouncements = useCallback(async (cursor?: string) => {
     try {
       setLoading(true);
-      const response = await professorAPI.getAnnouncements();
-      setAnnouncements(response.data.announcements);
-    } catch (error) {
+      const response = await professorAPI.getAnnouncements({ limit: 20, cursor });
+      setAnnouncements(previous => cursor ? [...previous, ...response.data.announcements] : response.data.announcements);
+      setAnnouncementPage(response.data.page ?? null);
+    } catch {
       showToast('Failed to load announcements', 'error');
     } finally {
       setLoading(false);
     }
+  }, [showToast]);
+
+  const loadMoreFolders = async () => {
+    const cursor = folderPage?.nextCursor;
+    if (!cursor) return;
+    try {
+      setLoading(true);
+      const response = await professorAPI.getFolders(currentFolderId, { limit: 20, cursor });
+      setFolders(previous => [...previous, ...response.data.folders]);
+      setFolderPage(response.data.page ?? null);
+    } catch {
+      showToast('Could not load more folders', 'error');
+    } finally { setLoading(false); }
   };
+
+  useEffect(() => { void loadCourse(); }, [loadCourse]);
+
+  useEffect(() => {
+    if (activeTab === 'students') void loadStudents();
+    if (activeTab === 'assignments') void loadAssignments();
+    if (activeTab === 'announcements') void loadAnnouncements();
+  }, [activeTab, loadStudents, loadAssignments, loadAnnouncements]);
+
+  useEffect(() => {
+    if (activeTab === 'materials') void loadMaterials();
+  }, [activeTab, loadMaterials]);
 
   const handleAddAssignment = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -125,8 +217,8 @@ const ProfessorDashboard: React.FC = () => {
       setNewAssignment({ title: '', description: '', questionText: '', dueDate: '', points: 100 });
       setShowAddAssignment(false);
       loadAssignments();
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to create assignment', 'error');
+    } catch (error: unknown) {
+      showToast(apiErrorMessage(error, 'Failed to create assignment'), 'error');
     }
   };
 
@@ -136,8 +228,8 @@ const ProfessorDashboard: React.FC = () => {
       await professorAPI.deleteAssignment(id);
       showToast('Assignment deleted successfully', 'success');
       loadAssignments();
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to delete assignment', 'error');
+    } catch (error: unknown) {
+      showToast(apiErrorMessage(error, 'Failed to delete assignment'), 'error');
     }
   };
 
@@ -149,8 +241,8 @@ const ProfessorDashboard: React.FC = () => {
       setNewAnnouncement({ title: '', content: '' });
       setShowAddAnnouncement(false);
       loadAnnouncements();
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to post announcement', 'error');
+    } catch (error: unknown) {
+      showToast(apiErrorMessage(error, 'Failed to post announcement'), 'error');
     }
   };
 
@@ -160,35 +252,54 @@ const ProfessorDashboard: React.FC = () => {
       await professorAPI.deleteAnnouncement(id);
       showToast('Announcement deleted successfully', 'success');
       loadAnnouncements();
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to delete announcement', 'error');
+    } catch (error: unknown) {
+      showToast(apiErrorMessage(error, 'Failed to delete announcement'), 'error');
     }
   };
 
-  const handleUploadMaterials = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-
-    // Client-side validation
+  const uploadMaterials = async (files: FileList | File[]) => {
+    if (!files.length || uploadingFiles) return;
     const validation = validateByType(files, 'courseMaterials');
     if (!validation.valid) {
       showToast(validation.error || 'Invalid file selection', 'error');
-      e.target.value = '';
       return;
     }
-
+    const selected = Array.from(files);
+    setUploadProgress(selected.map((file, index) => ({ key: `${index}-${file.name}`, name: file.name, percent: 0, state: 'uploading' })));
+    let completed = 0;
     try {
       setUploadingFiles(true);
-      await professorAPI.uploadMaterials(files, currentFolderId);
-      showToast(`${files.length} attachment(s) accepted. Indexing will run in the background.`, 'success');
-      loadMaterials();
-      e.target.value = '';
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to upload materials', 'error');
-      e.target.value = '';
+      for (const [index, file] of selected.entries()) {
+        const key = `${index}-${file.name}`;
+        try {
+          await professorAPI.uploadMaterials([file], currentFolderId, event => {
+            const percent = event.total ? Math.min(100, Math.round(event.loaded / event.total * 100)) : 0;
+            setUploadProgress(previous => previous.map(item => item.key === key ? { ...item, percent } : item));
+          });
+          completed += 1;
+          setUploadProgress(previous => previous.map(item => item.key === key ? { ...item, percent: 100, state: 'queued' } : item));
+        } catch {
+          setUploadProgress(previous => previous.map(item => item.key === key ? { ...item, state: 'error', error: 'Upload failed. Select this file again to retry.' } : item));
+        }
+      }
+      if (completed) {
+        showToast(`${completed} attachment${completed === 1 ? '' : 's'} accepted for indexing`, 'success');
+        await loadMaterials();
+      }
     } finally {
       setUploadingFiles(false);
     }
+  };
+
+  const handleUploadMaterials = (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (event.target.files) void uploadMaterials(event.target.files);
+    event.target.value = '';
+  };
+
+  const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setDragActive(false);
+    if (event.dataTransfer.files.length) void uploadMaterials(event.dataTransfer.files);
   };
 
   const handleCreateFolder = async () => {
@@ -203,8 +314,8 @@ const ProfessorDashboard: React.FC = () => {
       setNewFolderName('');
       setShowCreateFolder(false);
       loadMaterials();
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to create folder', 'error');
+    } catch (error: unknown) {
+      showToast(apiErrorMessage(error, 'Failed to create folder'), 'error');
     } finally {
       setCreatingFolder(false);
     }
@@ -216,8 +327,8 @@ const ProfessorDashboard: React.FC = () => {
       await professorAPI.deleteFolder(folderId);
       showToast('Folder deleted successfully', 'success');
       loadMaterials();
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to delete folder', 'error');
+    } catch (error: unknown) {
+      showToast(apiErrorMessage(error, 'Failed to delete folder'), 'error');
     }
   };
 
@@ -227,8 +338,8 @@ const ProfessorDashboard: React.FC = () => {
       await professorAPI.deleteMaterial(id);
       showToast('Material deleted successfully', 'success');
       loadMaterials();
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to delete material', 'error');
+    } catch (error: unknown) {
+      showToast(apiErrorMessage(error, 'Failed to delete material'), 'error');
     }
   };
 
@@ -236,8 +347,8 @@ const ProfessorDashboard: React.FC = () => {
     try {
       const response = await professorAPI.downloadMaterial(id);
       window.open(response.data.url, '_blank');
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to download material', 'error');
+    } catch (error: unknown) {
+      showToast(apiErrorMessage(error, 'Failed to download material'), 'error');
     }
   };
 
@@ -245,10 +356,10 @@ const ProfessorDashboard: React.FC = () => {
     try {
       setRetryingMaterialId(id);
       await professorAPI.reindexMaterial(id);
-      showToast('Attachment queued for indexing. Refresh to check its status.', 'success');
+      showToast('Attachment queued for indexing. Its status updates automatically while this tab is open.', 'success');
       await loadMaterials();
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Could not queue attachment for indexing', 'error');
+    } catch (error: unknown) {
+      showToast(apiErrorMessage(error, 'Could not queue attachment for indexing'), 'error');
     } finally { setRetryingMaterialId(null); }
   };
 
@@ -273,6 +384,14 @@ const ProfessorDashboard: React.FC = () => {
   }
 
   // Check if professor doesn't have a course assigned
+  if (courseLoading) {
+    return <div className="pending-approval" role="status">Loading your teaching workspace...</div>;
+  }
+
+  if (courseError) {
+    return <div className="pending-approval"><div className="pending-card"><h1>Course unavailable</h1><p>Your course could not be loaded.</p><button type="button" onClick={loadCourse}>Retry</button></div></div>;
+  }
+
   if (!course) {
     return (
       <div className="pending-approval">
@@ -288,57 +407,38 @@ const ProfessorDashboard: React.FC = () => {
 
   return (
     <div className="professor-dashboard">
-      <header className="dashboard-header">
+      <header className="dashboard-header dashboard-header--workspace">
         <div className="header-content">
           <div>
-            <h1>Professor Dashboard</h1>
-            <p>Welcome, {user?.fullName}</p>
+            <h1>Teaching workspace</h1>
+            <p>Welcome, {user?.fullName}. Review what needs your attention.</p>
             {course && <p className="course-title">{course.title}</p>}
-          </div>
-          <div className="header-actions">
-            <button onClick={() => navigate('/ai-agent-hub')} className="ai-hub-button">
-              🤖 AI Agent Hub
-            </button>
-            <button onClick={logout} className="logout-button">Logout</button>
           </div>
         </div>
       </header>
 
-      <div className="dashboard-tabs">
-        <button className={`tab ${activeTab === 'overview' ? 'active' : ''}`} onClick={() => setActiveTab('overview')}>
+      <nav aria-label="Teaching sections" className="dashboard-tabs">
+        <button type="button" aria-current={activeTab === 'overview' ? 'page' : undefined} className={`tab ${activeTab === 'overview' ? 'active' : ''}`} onClick={() => setActiveTab('overview')}>
           Overview
         </button>
-        <button className={`tab ${activeTab === 'students' ? 'active' : ''}`} onClick={() => setActiveTab('students')}>
+        <button type="button" aria-current={activeTab === 'students' ? 'page' : undefined} className={`tab ${activeTab === 'students' ? 'active' : ''}`} onClick={() => setActiveTab('students')}>
           Students
         </button>
-        <button className={`tab ${activeTab === 'materials' ? 'active' : ''}`} onClick={() => setActiveTab('materials')}>
+        <button type="button" aria-current={activeTab === 'materials' ? 'page' : undefined} className={`tab ${activeTab === 'materials' ? 'active' : ''}`} onClick={() => setActiveTab('materials')}>
           Course Materials
         </button>
-        <button className={`tab ${activeTab === 'assignments' ? 'active' : ''}`} onClick={() => setActiveTab('assignments')}>
+        <button type="button" aria-current={activeTab === 'assignments' ? 'page' : undefined} className={`tab ${activeTab === 'assignments' ? 'active' : ''}`} onClick={() => setActiveTab('assignments')}>
           Assignments
         </button>
-        <button className={`tab ${activeTab === 'announcements' ? 'active' : ''}`} onClick={() => setActiveTab('announcements')}>
+        <button type="button" aria-current={activeTab === 'announcements' ? 'page' : undefined} className={`tab ${activeTab === 'announcements' ? 'active' : ''}`} onClick={() => setActiveTab('announcements')}>
           Announcements
         </button>
-      </div>
+      </nav>
 
       <main className="dashboard-main">
-        {loading && <div className="loading">Loading...</div>}
+        {loading && activeTab !== 'overview' && <div className="loading" role="status">Loading...</div>}
 
-        {activeTab === 'overview' && course && (
-          <div className="overview-section">
-            <div className="course-info-card">
-              <h2>{course.title}</h2>
-              <p>{course.description}</p>
-              <div className="stats">
-                <div className="stat">
-                  <span className="stat-number">{course.enrolled_students_count}</span>
-                  <span className="stat-label">Enrolled Students</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
+        {activeTab === 'overview' && course && <ProfessorOverview course={course} onTab={setActiveTab} />}
 
         {activeTab === 'students' && (
           <div className="students-section">
@@ -356,7 +456,7 @@ const ProfessorDashboard: React.FC = () => {
                     </tr>
                   </thead>
                   <tbody>
-                    {students.map((student: any) => (
+                    {students.map((student) => (
                       <tr key={student.id}>
                         <td>{student.full_name}</td>
                         <td>{student.email}</td>
@@ -375,7 +475,7 @@ const ProfessorDashboard: React.FC = () => {
             <div className="section-header">
               <h2>Course Materials</h2>
               <div className="materials-actions-bar">
-                <button type="button" className="btn-secondary" onClick={loadMaterials} disabled={loading}>Refresh status</button>
+                <button type="button" className="btn-secondary" onClick={() => void loadMaterials()} disabled={loading}>Refresh status</button>
                 <button
                   className="btn-secondary"
                   onClick={() => setShowCreateFolder(true)}
@@ -383,20 +483,27 @@ const ProfessorDashboard: React.FC = () => {
                   + New Folder
                 </button>
                 <label htmlFor="file-upload" className="btn-primary" style={{ cursor: 'pointer' }}>
-                  {uploadingFiles ? 'Uploading...' : '+ Upload Files'}
+                  {uploadingFiles ? 'Uploading...' : 'Choose files'}
                   <input
                     id="file-upload"
                     type="file"
                     multiple
+                    accept={getAcceptAttribute()}
                     onChange={handleUploadMaterials}
-                    style={{ display: 'none' }}
+                    className="upload-file-input"
                     disabled={uploadingFiles}
                   />
                 </label>
               </div>
             </div>
 
-            <p className="material-index-help">Attachments become available for course answers after indexing finishes. Scanned PDFs and images need a readable text version while text recognition is unavailable.</p>
+            <p className="material-index-help">New attachments wait for the indexing worker, then become available for course answers after processing. Active status updates automatically while this tab is visible. A review warning means some text was not readable; upload a text-based copy for full coverage. Scanned PDFs and images are not text-recognized.</p>
+            <div className={`material-dropzone${dragActive ? ' material-dropzone--active' : ''}`} onDragOver={event => event.preventDefault()} onDragEnter={event => { event.preventDefault(); setDragActive(true); }} onDragLeave={() => setDragActive(false)} onDrop={handleDrop}>
+              <strong>Drop course files here</strong>
+              <span>Or use Choose files above. Up to 10 files, 10 MB each. PDF, Word, PowerPoint (.ppt and .pptx), spreadsheets, and text files are supported. The server checks file contents.</span>
+            </div>
+            {uploadProgress.length > 0 && <div className="material-upload-progress"><h3>Upload transfer</h3><ul aria-label="File upload progress">{uploadProgress.map(item => <li key={item.key}><span>{item.name}</span>{item.state === 'uploading' && <progress value={item.percent} max="100" aria-label={`Uploading ${item.name}`}>{item.percent}%</progress>}<span>{item.state === 'uploading' ? item.percent ? `${item.percent}% transferred` : 'Transferring' : item.state === 'queued' ? 'Transfer complete. Indexing status appears below.' : item.error}</span></li>)}</ul></div>}
+            {activeMaterialIds && <p className="material-index-help">Checking {activeMaterialIds.split(',').length} active attachment{activeMaterialIds.includes(',') ? 's' : ''} for updates.</p>}
 
             {/* Breadcrumb Navigation */}
             <div className="folder-breadcrumb">
@@ -406,7 +513,7 @@ const ProfessorDashboard: React.FC = () => {
               >
                 🏠 Home
               </button>
-              {breadcrumb.map((crumb: any, index: number) => (
+              {breadcrumb.map((crumb, index: number) => (
                 <React.Fragment key={crumb.id}>
                   <span className="breadcrumb-separator">/</span>
                   <button
@@ -467,16 +574,14 @@ const ProfessorDashboard: React.FC = () => {
             ) : (
               <div className="materials-list">
                 {/* Folders first */}
-                {folders.map((folder: any) => (
+                {folders.map((folder) => (
                   <div
                     key={`folder-${folder.id}`}
                     className="material-card folder-card"
-                    onClick={() => setCurrentFolderId(folder.id)}
-                    style={{ cursor: 'pointer' }}
                   >
                     <div className="material-icon folder-icon">&#128193;</div>
                     <div className="material-info">
-                      <h3>{folder.name}</h3>
+                      <h3><button type="button" className="folder-open-button" onClick={() => setCurrentFolderId(folder.id)}>Open {folder.name}</button></h3>
                       <p className="material-meta">
                         Folder &bull; Created {new Date(folder.created_at).toLocaleDateString()}
                       </p>
@@ -484,6 +589,8 @@ const ProfessorDashboard: React.FC = () => {
                     <div className="material-actions">
                       <button
                         className="btn-delete-icon"
+                        type="button"
+                        aria-label={`Delete folder ${folder.name}`}
                         onClick={(e) => {
                           e.stopPropagation();
                           handleDeleteFolder(folder.id);
@@ -496,7 +603,7 @@ const ProfessorDashboard: React.FC = () => {
                 ))}
 
                 {/* Files */}
-                {materials.map((material: any) => (
+                {materials.map((material) => (
                   <div key={`file-${material.id}`} className="material-card">
                     <div className="material-icon">&#128196;</div>
                     <div className="material-info">
@@ -521,6 +628,8 @@ const ProfessorDashboard: React.FC = () => {
                       </button>
                       <button
                         className="btn-delete-icon"
+                        type="button"
+                        aria-label={`Delete material ${material.file_name}`}
                         onClick={() => handleDeleteMaterial(material.id)}
                       >
                         &#10005;
@@ -605,7 +714,7 @@ const ProfessorDashboard: React.FC = () => {
               <p className="empty-message">No assignments created yet</p>
             ) : (
               <div className="assignments-list">
-                {assignments.map((assignment: any) => (
+                {assignments.map((assignment) => (
                   <div
                     key={assignment.id}
                     className="assignment-card clickable"
@@ -682,7 +791,7 @@ const ProfessorDashboard: React.FC = () => {
               <p className="empty-message">No announcements posted yet</p>
             ) : (
               <div className="announcements-list">
-                {announcements.map((announcement: any) => (
+                {announcements.map((announcement) => (
                   <div key={announcement.id} className="announcement-card">
                     <div className="announcement-header">
                       <h3>{announcement.title}</h3>
@@ -698,6 +807,11 @@ const ProfessorDashboard: React.FC = () => {
             )}
           </div>
         )}
+        {activeTab === 'students' && studentPage?.hasMore && <button type="button" className="btn-secondary" disabled={loading} onClick={() => studentPage.nextCursor && void loadStudents(studentPage.nextCursor)}>Load more students</button>}
+        {activeTab === 'materials' && materialPage?.hasMore && <button type="button" className="btn-secondary" disabled={loading} onClick={() => materialPage.nextCursor && void loadMaterials(materialPage.nextCursor)}>Load more materials</button>}
+        {activeTab === 'materials' && folderPage?.hasMore && <button type="button" className="btn-secondary" disabled={loading} onClick={() => void loadMoreFolders()}>Load more folders</button>}
+        {activeTab === 'assignments' && assignmentPage?.hasMore && <button type="button" className="btn-secondary" disabled={loading} onClick={() => assignmentPage.nextCursor && void loadAssignments(assignmentPage.nextCursor)}>Load more assignments</button>}
+        {activeTab === 'announcements' && announcementPage?.hasMore && <button type="button" className="btn-secondary" disabled={loading} onClick={() => announcementPage.nextCursor && void loadAnnouncements(announcementPage.nextCursor)}>Load more announcements</button>}
       </main>
     </div>
   );

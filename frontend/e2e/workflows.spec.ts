@@ -17,7 +17,7 @@ test('professor upload displays accepted indexing status', async ({ page }) => {
   await page.getByRole('button', { name: 'Course Materials' }).click();
   await expect(page.getByText('No course materials uploaded yet')).toBeVisible();
   await page.locator('#file-upload').setInputFiles({ name: 'synthetic-notes.txt', mimeType: 'text/plain', buffer: Buffer.from('Synthetic course material') });
-  await expect(page.getByText('synthetic-notes.txt')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'synthetic-notes.txt' })).toBeVisible();
   await expect(page.getByText('Waiting to index')).toBeVisible();
   expect(uploaded).toBe(true);
 });

@@ -358,16 +358,22 @@ async function extractFromExcel(fileBuffer: Buffer): Promise<ProcessedDocument> 
     for (const sheetName of workbook.SheetNames) {
       const worksheet = workbook.Sheets[sheetName];
       if (!worksheet?.['!ref']) continue;
-      const range = XLSX.utils.decode_range(worksheet['!ref']);
-      for (let row = range.s.r; row <= range.e.r; row++) {
-        const cells: string[] = [];
-        for (let col = range.s.c; col <= range.e.c; col++) {
-          const address = XLSX.utils.encode_cell({r: row, c: col});
-          const cell = worksheet[address];
-          if (cell && cell.v !== undefined && cell.v !== null) cells.push(`${address}: ${XLSX.utils.format_cell(cell)}`);
-        }
-        if (!cells.length) continue;
-        const text = cells.join(' | ');
+      const rows = new Map<number, Array<{column: number; text: string}>>();
+      // !ref describes a rectangle, not its populated cells. Sparse sheets can
+      // declare the entire Excel grid; visit actual cell keys instead.
+      for (const address of Object.keys(worksheet)) {
+        if (!/^[A-Z]+[1-9][0-9]*$/.test(address)) continue;
+        const cell = worksheet[address];
+        if (!cell || cell.v === undefined || cell.v === null) continue;
+        const {r: row, c: column} = XLSX.utils.decode_cell(address);
+        const cells = rows.get(row) ?? [];
+        cells.push({column, text: `${address}: ${XLSX.utils.format_cell(cell)}`});
+        rows.set(row, cells);
+      }
+      for (const row of [...rows.keys()].sort((a, b) => a - b)) {
+        const cells = rows.get(row)!;
+        cells.sort((a, b) => a.column - b.column);
+        const text = cells.map(cell => cell.text).join(' | ');
         textParts.push(`${sheetName}, row ${row + 1}: ${text}`);
         for (const chunk of chunkTextSemantic(text)) {
           const index = sheetChunks.length;

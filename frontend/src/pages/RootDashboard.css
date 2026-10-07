@@ -584,3 +584,13 @@
   margin-bottom: 1rem;
   color: var(--color-text-primary);
 }
+.root-dashboard .dashboard-tabs { max-width: 100%; overflow-x: auto; padding-inline: var(--ui-space-4); }
+.root-dashboard .dashboard-tabs .tab { flex: 0 0 auto; min-height: 44px; white-space: nowrap; }
+.root-dashboard .dashboard-main { min-width: 0; max-width: 100%; }
+.root-dashboard .table-container { max-width: 100%; overflow-x: auto; }
+.root-dashboard .data-table { min-width: 40rem; }
+.root-dashboard .data-table thead { background: var(--ui-surface-muted); }
+.root-dashboard .data-table th { color: var(--ui-text); }
+.root-dashboard .dashboard-header--workspace { padding: var(--ui-space-5); }
+.dashboard-load-more { display: flex; flex-wrap: wrap; gap: var(--ui-space-2); }
+@media (max-width: 650px) { .root-dashboard .dashboard-main { padding: var(--ui-space-4); } .root-dashboard .stats-grid, .root-dashboard .courses-grid { grid-template-columns: 1fr; } }

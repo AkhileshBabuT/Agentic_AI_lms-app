@@ -1,6 +1,10 @@
 .message-metadata { margin-top: 14px; padding-top: 10px; border-top: 1px solid #e5e7eb; font-size: 13px; }
 .course-only-label { display: inline-block; color: #475569; margin-right: 12px; }
 .references-toggle, .references-refresh { font: inherit; cursor: pointer; background: #f1f5f9; color: #334155; border: 1px solid #cbd5e1; border-radius: 6px; padding: 6px 10px; }
+.reference-chips { display: inline-flex; flex-wrap: wrap; gap: 6px; margin: 0 8px 8px 0; }
+.reference-chip { font: inherit; font-weight: 700; color: #861f41; background: #fff; border: 1px solid #861f41; border-radius: 999px; min-width: 36px; min-height: 36px; cursor: pointer; }
+.reference-chip:hover { background: #f9edf1; }
+.reference-chip:focus-visible { outline: 2px solid #861f41; outline-offset: 3px; }
 .references-toggle:hover, .references-refresh:hover { background: #e2e8f0; }
 .references-toggle:focus-visible, .references-refresh:focus-visible, .reference-open:focus-visible { outline: 2px solid #2563eb; outline-offset: 3px; }
 .answer-references { margin-top: 12px; display: grid; gap: 12px; }

@@ -272,6 +272,52 @@ describe('course chat RAG integration', () => {
     expect(stubs.answer).not.toHaveBeenCalled();
     expect(stubs.connect).not.toHaveBeenCalled();
   });
+  it('rejects a concurrent retry and marks a disconnected stream retryable without a duplicate question', async () => {
+    const hash = createHash('sha256').update('Explain indexes').digest('hex');
+    let claims = 0;
+    stubs.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('SELECT course_id FROM chat_sessions')) return { rows: [{ course_id: 3 }] };
+      if (sql.includes('INSERT INTO chat_stream_requests'))
+        return { rows: ++claims === 1 ? [{ student_message_id: null }] : [] };
+      if (sql.includes('SELECT question_hash,status,student_message_id'))
+        return { rows: [{ question_hash: hash, status: 'processing', student_message_id: 21 }] };
+      if (sql.includes("message_metadata->>'idempotencyKey'")) return { rows: [] };
+      if (sql.includes("SET status='processing'")) return { rows: [] };
+      if (sql.includes("SET status='failed'")) return { rows: [] };
+      throw new Error(`Unexpected query: ${sql}`);
+    });
+    const clientQuery = vi.fn(async (sql: string) => {
+      if (sql.includes('SELECT student_message_id')) return { rows: [{ student_message_id: null }] };
+      if (sql.includes('INSERT INTO chat_messages')) return { rows: [{ id: 21, content: 'Explain indexes' }] };
+      return { rows: [] };
+    });
+    stubs.connect.mockResolvedValueOnce({ query: clientQuery, release: vi.fn() });
+    stubs.answer.mockImplementationOnce((input: { signal: AbortSignal }) => new Promise((_resolve, reject) => {
+      if (input.signal.aborted) reject(new Error('cancelled'));
+      else input.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true });
+    }));
+    const controller = new AbortController();
+    const request = () => fetch(base + '/sessions/2/messages/stream', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'Idempotency-Key': 'abcdefghijklmnop' },
+      body: JSON.stringify({ content: 'Explain indexes' }),
+    });
+    const first = await fetch(base + '/sessions/2/messages/stream', {
+      method: 'POST', signal: controller.signal,
+      headers: { 'content-type': 'application/json', 'Idempotency-Key': 'abcdefghijklmnop' },
+      body: JSON.stringify({ content: 'Explain indexes' }),
+    });
+    expect(first.status).toBe(200);
+    const reader = first.body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain('event: accepted');
+    const second = await request();
+    expect(second.status).toBe(409);
+    expect(stubs.answer).toHaveBeenCalledTimes(1);
+    expect(stubs.persist).not.toHaveBeenCalled();
+    controller.abort();
+    await vi.waitFor(() => expect(stubs.query.mock.calls.some(call =>
+      String(call[0]).includes("SET status='failed'"))).toBe(true));
+    expect(clientQuery.mock.calls.filter(call => String(call[0]).includes('INSERT INTO chat_messages'))).toHaveLength(1);
+  });
   it('rejects invalid IDs without querying and retires score endpoints without database work', async () => {
     expect((await post('/sessions/2bad/messages', { content: 'Explain indexes' })).status).toBe(400);
     expect((await fetch(base + '/messages/12/trust-score')).status).toBe(410);

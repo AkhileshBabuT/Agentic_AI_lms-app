@@ -1,3 +1,5 @@
+import * as XLSX from 'xlsx';
+import JSZip from 'jszip';
 import { describe, it, expect, vi } from 'vitest';
 import {readFileSync} from 'fs';
 import path from 'path';
@@ -47,6 +49,38 @@ describe('OCR is deferred', () => {
     expect(result.content_chunks.map(chunk => chunk.metadata.page_number)).toEqual([1,3]);
     expect(ocrSpy).not.toHaveBeenCalled();
   });
+});
+
+describe('sparse spreadsheets', () => {
+  it('extracts populated cells across a full-grid declared range with true sheet-row locators', async () => {
+    const workbook = XLSX.utils.book_new();
+    const worksheet = XLSX.utils.aoa_to_sheet([['first', undefined, 'third'], [], [undefined, 42]]);
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Sparse');
+    const zip = await JSZip.loadAsync(XLSX.write(workbook, {type: 'buffer', bookType: 'xlsx'}));
+    const sheet = await zip.file('xl/worksheets/sheet1.xml')!.async('string');
+    // Patch the ZIP directly: SheetJS's writer itself scans !ref and would
+    // stall while constructing a workbook with this declared dimension.
+    expect(sheet).toContain('ref="A1:C3"');
+    const expanded = sheet.replace('ref="A1:C3"', 'ref="A1:XFD1048576"')
+      .replace('</sheetData>', '<row r="1048576"><c r="XFD1048576" t="inlineStr"><is><t>last</t></is></c></row></sheetData>');
+    expect(expanded).not.toBe(sheet);
+    zip.file('xl/worksheets/sheet1.xml', expanded);
+    const result = await extractTextFromFile(await zip.generateAsync({type: 'nodebuffer'}),
+      'sparse.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+
+    expect(result.metadata.error).toBeUndefined();
+    expect(result.content_text.split('\n')).toEqual([
+      'Sparse, row 1: A1: first | C1: third',
+      'Sparse, row 3: B3: 42',
+      'Sparse, row 1048576: XFD1048576: last',
+    ]);
+    expect(result.content_chunks.map(chunk => ({text: chunk.text, section: chunk.metadata.section,
+      kind: chunk.metadata.locator_kind, index: chunk.metadata.chunk_index}))).toEqual([
+      {text: 'A1: first | C1: third', section: 'Sparse, row 1', kind: 'sheet_row', index: 0},
+      {text: 'B3: 42', section: 'Sparse, row 3', kind: 'sheet_row', index: 1},
+      {text: 'XFD1048576: last', section: 'Sparse, row 1048576', kind: 'sheet_row', index: 2},
+    ]);
+  }, 5000);
 });
 
 describe('needsOcr', () => {

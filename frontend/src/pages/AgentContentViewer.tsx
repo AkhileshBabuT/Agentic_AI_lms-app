@@ -1,8 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
+import type { AxiosResponse } from 'axios';
 import { useParams, useNavigate } from 'react-router-dom';
 import { chatAPI } from '../services/api';
 import { useToast } from '../components/Toast';
 import MessageMetadata from '../components/MessageMetadata';
+import { httpErrorMessage } from '../utils/httpError';
 import './AgentContentViewer.css';
 
 interface ContentDetails {
@@ -13,7 +15,7 @@ interface ContentDetails {
   course_name: string;
   agent_name: string;
   generated_at: string;
-  content_metadata: any;
+  content_metadata: Record<string, unknown> | null;
 }
 
 const AgentContentViewer: React.FC = () => {
@@ -25,17 +27,15 @@ const AgentContentViewer: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [deleting, setDeleting] = useState(false);
 
-  useEffect(() => {
-    loadContent();
-  }, [contentId]);
-
-  const loadContent = async () => {
+  const loadContent = useCallback(async (signal?: AbortSignal) => {
     try {
       setLoading(true);
       // Get all content and find the specific one
-      const response = await chatAPI.getGeneratedContent({ isSaved: true });
+      const response: AxiosResponse<{ content: ContentDetails[] }> =
+        await chatAPI.getGeneratedContent({ isSaved: true }, signal);
+      if (signal?.aborted) return;
       const foundContent = response.data.content.find(
-        (c: ContentDetails) => c.id === parseInt(contentId!)
+        (c) => c.id === Number.parseInt(contentId ?? '', 10)
       );
 
       if (!foundContent) {
@@ -45,14 +45,21 @@ const AgentContentViewer: React.FC = () => {
       }
 
       setContent(foundContent);
-    } catch (error: any) {
+    } catch (error: unknown) {
+      if (signal?.aborted) return;
       console.error('Error loading content:', error);
-      showToast(error.response?.data?.error || 'Failed to load content', 'error');
+      showToast(httpErrorMessage(error, 'Failed to load content'), 'error');
       navigate('/ai-agent-hub');
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
-  };
+  }, [contentId, navigate, showToast]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadContent(controller.signal);
+    return () => controller.abort();
+  }, [loadContent]);
 
   const handleDelete = async () => {
     if (!content || !window.confirm('Are you sure you want to delete this content?')) {
@@ -64,9 +71,9 @@ const AgentContentViewer: React.FC = () => {
       await chatAPI.deleteGeneratedContent(content.id);
       showToast('Content deleted successfully', 'success');
       navigate('/ai-agent-hub');
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error deleting content:', error);
-      showToast(error.response?.data?.error || 'Failed to delete content', 'error');
+      showToast(httpErrorMessage(error, 'Failed to delete content'), 'error');
     } finally {
       setDeleting(false);
     }
@@ -192,7 +199,7 @@ const AgentContentViewer: React.FC = () => {
           </div>
         </div>
 
-        {Number.isSafeInteger(content.content_metadata?.originalMessageId) && (
+        {typeof content.content_metadata?.originalMessageId === 'number' && Number.isSafeInteger(content.content_metadata.originalMessageId) && (
           <MessageMetadata messageId={content.content_metadata.originalMessageId} savedContentId={content.id} metadata={content.content_metadata} />
         )}
       </div>

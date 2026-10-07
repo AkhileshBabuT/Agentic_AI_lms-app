@@ -47,7 +47,7 @@ export const connectDB = async () => {
         throw new Error('Database schema is incomplete; run npm run db:migrate before API startup');
       }
       const version = await pool.query('SELECT version FROM app_schema_version WHERE singleton = true');
-      if (version.rows[0]?.version !== 9) {
+      if (version.rows[0]?.version !== 10) {
         throw new Error('Database schema version is incompatible; run npm run db:migrate before API startup');
       }
     }
@@ -66,7 +66,7 @@ export const migrateDatabase = async () => {
   const { runMigrations } = await import('../db/migrations/runMigrations');
   await runMigrations();
   await pool.query('CREATE TABLE IF NOT EXISTS app_schema_version (singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton), version integer NOT NULL, updated_at timestamptz NOT NULL DEFAULT now())');
-  await pool.query('INSERT INTO app_schema_version (singleton, version) VALUES (true, 9) ON CONFLICT (singleton) DO UPDATE SET version = EXCLUDED.version, updated_at = now()');
+  await pool.query('INSERT INTO app_schema_version (singleton, version) VALUES (true, 10) ON CONFLICT (singleton) DO UPDATE SET version = EXCLUDED.version, updated_at = now()');
 };
 
 export const closeDB = async () => pool.end();

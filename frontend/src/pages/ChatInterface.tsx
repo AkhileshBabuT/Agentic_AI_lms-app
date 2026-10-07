@@ -1,19 +1,15 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import { chatAPI } from '../services/api';
+import { submitChatStream, ChatStreamError } from '../services/chatStream';
+import type { StreamMessage } from '../services/chatStream';
 import { useToast } from '../components/Toast';
 import MessageMetadata from '../components/MessageMetadata';
+import { httpErrorMessage } from '../utils/httpError';
 import './ChatInterface.css';
 
-interface Message {
-  id: number;
-  session_id: number;
-  sender_type: 'student' | 'agent' | 'system';
-  content: string;
-  message_metadata: any;
-  created_at: string;
-}
+type Message = StreamMessage;
 
 interface Session {
   id: number;
@@ -35,6 +31,8 @@ const ChatInterface: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [agentStatus, setAgentStatus] = useState<'ready' | 'thinking' | 'active'>('ready');
+  const [stageLabel, setStageLabel] = useState('');
+  const [pendingRetry, setPendingRetry] = useState<{ content: string; key: string } | null>(null);
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [selectedMessageToSave, setSelectedMessageToSave] = useState<Message | null>(null);
   const [saveContentType, setSaveContentType] = useState('notes');
@@ -43,12 +41,33 @@ const ChatInterface: React.FC = () => {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const streamController = useRef<AbortController | null>(null);
+  const route = useMemo(() => ({ sessionId }), [sessionId]);
+  const activeRoute = useRef<typeof route | null>(null);
+  const [loadedSessionId, setLoadedSessionId] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (sessionId) {
-      loadChatData();
-    }
-  }, [sessionId]);
+  useLayoutEffect(() => {
+    activeRoute.current = route;
+    setSession(null);
+    setMessages([]);
+    setInputMessage('');
+    setLoading(true);
+    setLoadedSessionId(null);
+    setSending(false);
+    setAgentStatus('ready');
+    setStageLabel('');
+    setPendingRetry(null);
+    setShowSaveModal(false);
+    setSelectedMessageToSave(null);
+    setSaveContentTitle('');
+    setSaveContentType('notes');
+    setSaving(false);
+    return () => {
+      activeRoute.current = null;
+      streamController.current?.abort();
+      streamController.current = null;
+    };
+  }, [route]);
 
   useEffect(() => {
     scrollToBottom();
@@ -58,65 +77,110 @@ const ChatInterface: React.FC = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  const loadChatData = async () => {
-    try {
-      setLoading(true);
+  useEffect(() => {
+    if (!sessionId) return;
+    const controller = new AbortController();
+    const isCurrent = () => activeRoute.current === route && !controller.signal.aborted;
+    const loadChatData = async () => {
+      try {
+        // Load the requested session directly, including sessions beyond the first list page.
+        const sessionResponse = await chatAPI.getSession(parseInt(sessionId), controller.signal);
+        if (!isCurrent()) return;
+        const currentSession = sessionResponse.data.session as Session;
+        if (!currentSession) {
+          showToast('Chat session not found', 'error');
+          navigate('/ai-agent-hub');
+          return;
+        }
 
-      // Load session details
-      const sessionsResponse = await chatAPI.getSessions();
-      const currentSession = sessionsResponse.data.sessions.find(
-        (s: Session) => s.id === parseInt(sessionId!)
-      );
-
-      if (!currentSession) {
-        showToast('Chat session not found', 'error');
+        const messagesResponse = await chatAPI.getMessages(parseInt(sessionId), undefined, controller.signal);
+        if (!isCurrent()) return;
+        setSession(currentSession);
+        setMessages(messagesResponse.data.messages);
+      } catch (error: unknown) {
+        if (!isCurrent()) return;
+        showToast(httpErrorMessage(error, 'Failed to load chat'), 'error');
         navigate('/ai-agent-hub');
-        return;
+      } finally {
+        if (isCurrent()) {
+          setLoadedSessionId(sessionId);
+          setLoading(false);
+        }
       }
+    };
+    void loadChatData();
+    return () => controller.abort();
+  }, [navigate, route, sessionId, showToast]);
 
-      setSession(currentSession);
-
-      // Load messages
-      const messagesResponse = await chatAPI.getMessages(parseInt(sessionId!));
-      setMessages(messagesResponse.data.messages);
-
-    } catch (error: any) {
-      console.error('Error loading chat data:', error);
-      showToast(error.response?.data?.error || 'Failed to load chat', 'error');
-      navigate('/ai-agent-hub');
+  const sendStream = async (messageContent: string, requestKey: string, optimisticId?: number) => {
+    if (!sessionId) return;
+    setSending(true);
+    setAgentStatus('thinking');
+    setStageLabel('Connecting to the course assistant...');
+    const controller = new AbortController();
+    const requestRoute = route;
+    const isCurrent = () => activeRoute.current === requestRoute;
+    streamController.current = controller;
+    let accepted = false;
+    try {
+      await submitChatStream(parseInt(sessionId), messageContent, requestKey, {
+        accepted: studentMessage => {
+          if (!isCurrent() || controller.signal.aborted) return;
+          accepted = true;
+          setMessages(prev => {
+            const withoutLocal = optimisticId === undefined ? prev : prev.filter(message => message.id !== optimisticId);
+            return withoutLocal.some(message => message.id === studentMessage.id)
+              ? withoutLocal : [...withoutLocal, studentMessage];
+          });
+        },
+        stage: stage => {
+          if (!isCurrent() || controller.signal.aborted) return;
+          const labels: Record<string, string> = {
+            searching_materials: 'Searching course materials...',
+            generating_answer: 'Drafting an answer...',
+            validating_citations: 'Checking document references...',
+            persisting: 'Saving the verified answer...',
+          };
+          setStageLabel(labels[stage] || 'Working on your answer...');
+        },
+        complete: agentMessage => {
+          if (!isCurrent() || controller.signal.aborted) return;
+          setMessages(prev => prev.some(message => message.id === agentMessage.id)
+            ? prev : [...prev, agentMessage]);
+          setPendingRetry(null);
+        },
+      }, controller.signal);
+      if (isCurrent()) setAgentStatus('ready');
+    } catch (error) {
+      if (!isCurrent()) return;
+      if (optimisticId !== undefined && !accepted)
+        setMessages(prev => prev.filter(message => message.id !== optimisticId));
+      setPendingRetry({ content: messageContent, key: requestKey });
+      if (!accepted) setInputMessage(messageContent);
+      const failure = error as ChatStreamError;
+      showToast(controller.signal.aborted ? 'Answer cancelled. You can retry the same question.'
+        : failure.message || 'The answer could not be completed. You can retry.', 'error');
+      setAgentStatus('ready');
     } finally {
-      setLoading(false);
+      if (isCurrent()) {
+        setStageLabel('');
+        setSending(false);
+        inputRef.current?.focus();
+      }
+      if (streamController.current === controller) streamController.current = null;
     }
   };
 
-  const handleSendMessage = async () => {
-    if (!inputMessage.trim() || sending || !sessionId) return;
-
-    const messageContent = inputMessage.trim();
+  const handleSendMessage = () => {
+    if (!inputMessage.trim() || sending || streamController.current || !sessionId) return;
+    const content = inputMessage.trim();
+    const key = crypto.randomUUID();
+    const optimisticId = -Date.now();
+    setPendingRetry(null);
     setInputMessage('');
-    setSending(true);
-    setAgentStatus('thinking');
-
-    try {
-      const response = await chatAPI.sendMessage(parseInt(sessionId), messageContent);
-
-      // Add both messages to the list
-      setMessages(prev => [
-        ...prev,
-        response.data.studentMessage,
-        response.data.agentMessage
-      ]);
-
-      setAgentStatus('ready');
-    } catch (error: any) {
-      console.error('Error sending message:', error);
-      showToast(error.response?.data?.error || 'Failed to send message', 'error');
-      setInputMessage(messageContent); // Restore message
-      setAgentStatus('ready');
-    } finally {
-      setSending(false);
-      inputRef.current?.focus();
-    }
+    setMessages(prev => [...prev, { id: optimisticId, session_id: parseInt(sessionId),
+      sender_type: 'student', content, message_metadata: {}, created_at: new Date().toISOString() }]);
+    void sendStream(content, key, optimisticId);
   };
 
   const handleKeyPress = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -128,12 +192,15 @@ const ChatInterface: React.FC = () => {
 
   const handleRegenerateResponse = async () => {
     if (!sessionId || sending) return;
+    const requestRoute = route;
+    const isCurrent = () => activeRoute.current === requestRoute;
 
     setSending(true);
     setAgentStatus('thinking');
 
     try {
       const response = await chatAPI.regenerateResponse(parseInt(sessionId));
+      if (!isCurrent()) return;
 
       // Remove last agent message and add new one
       setMessages(prev => {
@@ -145,12 +212,13 @@ const ChatInterface: React.FC = () => {
 
       showToast('Response regenerated', 'success');
       setAgentStatus('ready');
-    } catch (error: any) {
+    } catch (error: unknown) {
+      if (!isCurrent()) return;
       console.error('Error regenerating response:', error);
-      showToast(error.response?.data?.error || 'Failed to regenerate response', 'error');
+      showToast(httpErrorMessage(error, 'Failed to regenerate response'), 'error');
       setAgentStatus('ready');
     } finally {
-      setSending(false);
+      if (isCurrent()) setSending(false);
     }
   };
 
@@ -161,14 +229,18 @@ const ChatInterface: React.FC = () => {
 
   const handleArchiveSession = async () => {
     if (!sessionId) return;
+    const requestRoute = route;
+    const isCurrent = () => activeRoute.current === requestRoute;
 
     try {
       await chatAPI.archiveSession(parseInt(sessionId));
+      if (!isCurrent()) return;
       showToast('Chat archived successfully', 'success');
       navigate('/ai-agent-hub');
-    } catch (error: any) {
+    } catch (error: unknown) {
+      if (!isCurrent()) return;
       console.error('Error archiving session:', error);
-      showToast(error.response?.data?.error || 'Failed to archive chat', 'error');
+      showToast(httpErrorMessage(error, 'Failed to archive chat'), 'error');
     }
   };
 
@@ -185,6 +257,8 @@ const ChatInterface: React.FC = () => {
       return;
     }
 
+    const requestRoute = route;
+    const isCurrent = () => activeRoute.current === requestRoute;
     try {
       setSaving(true);
       await chatAPI.saveGeneratedContent({
@@ -197,15 +271,17 @@ const ChatInterface: React.FC = () => {
           savedAt: new Date().toISOString()
         }
       });
+      if (!isCurrent()) return;
 
       showToast('Content saved successfully', 'success');
       setShowSaveModal(false);
       setSelectedMessageToSave(null);
-    } catch (error: any) {
+    } catch (error: unknown) {
+      if (!isCurrent()) return;
       console.error('Error saving content:', error);
-      showToast(error.response?.data?.error || 'Failed to save content', 'error');
+      showToast(httpErrorMessage(error, 'Failed to save content'), 'error');
     } finally {
-      setSaving(false);
+      if (isCurrent()) setSaving(false);
     }
   };
 
@@ -268,13 +344,13 @@ const ChatInterface: React.FC = () => {
 
   const getAgentStatusText = () => {
     switch (agentStatus) {
-      case 'thinking': return 'Thinking...';
+      case 'thinking': return stageLabel || 'Working on your answer...';
       case 'active': return 'Active';
       default: return 'Ready';
     }
   };
 
-  if (loading) {
+  if (loading || loadedSessionId !== sessionId) {
     return (
       <div className="chat-interface">
         <div className="loading-container">
@@ -312,7 +388,7 @@ const ChatInterface: React.FC = () => {
               className="status-indicator"
               style={{ backgroundColor: getAgentStatusColor() }}
             ></span>
-            <span className="status-text">{getAgentStatusText()}</span>
+            <span className="status-text" role="status" aria-live="polite">{getAgentStatusText()}</span>
           </div>
           <div className="header-actions">
             <button className="action-button" title="Clear conversation" onClick={handleArchiveSession}>
@@ -359,6 +435,7 @@ const ChatInterface: React.FC = () => {
                           <MessageMetadata
                             messageId={message.id}
                             metadata={message.message_metadata}
+                            authorizedSources={message.sources}
                           />
                         )}
 
@@ -426,6 +503,12 @@ const ChatInterface: React.FC = () => {
         )}
 
         <div className="input-area">
+          {pendingRetry && !sending && (
+            <button type="button" className="suggestion-chip" onClick={() => {
+              setInputMessage('');
+              void sendStream(pendingRetry.content, pendingRetry.key);
+            }}>Retry previous question</button>
+          )}
           <textarea
             ref={inputRef}
             className="message-input"
@@ -451,6 +534,8 @@ const ChatInterface: React.FC = () => {
             >
               {sending ? '...' : '➤'}
             </button>
+            {sending && <button type="button" className="suggestion-chip"
+              onClick={() => streamController.current?.abort()}>Cancel answer</button>}
           </div>
         </div>
       </div>

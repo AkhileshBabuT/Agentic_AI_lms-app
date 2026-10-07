@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../components/Toast';
 import { professorAPI, gradingAssistantAPI } from '../services/api';
 import { validateByType } from '../utils/fileValidation';
+import { Dialog } from '../components/ui';
+import { httpErrorMessage } from '../utils/httpError';
 import type { TentativeGrade, GradingRubric } from '../types/agenticai';
 import './ProfessorAssignmentDetail.css';
 
@@ -23,6 +24,7 @@ interface Submission {
     file_size: number;
     uploaded_at: string;
   }>;
+  tentative_grade?: TentativeGrade | null;
 }
 
 interface Assignment {
@@ -41,16 +43,31 @@ interface Assignment {
   }>;
 }
 
+type SubmissionFilters = {
+  gradeState: 'all' | 'graded' | 'ungraded';
+  student: string;
+  sort: 'submitted_desc' | 'submitted_asc' | 'student_asc' | 'student_desc';
+};
+const defaultSubmissionFilters: SubmissionFilters = { gradeState: 'all', student: '', sort: 'submitted_desc' };
+
 const ProfessorAssignmentDetail: React.FC = () => {
   const { assignmentId } = useParams<{ assignmentId: string }>();
-  const { user, logout } = useAuth();
   const { showToast } = useToast();
 
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [assignment, setAssignment] = useState<Assignment | null>(null);
   const [submissions, setSubmissions] = useState<Submission[]>([]);
+  const [submissionsCursor, setSubmissionsCursor] = useState<string | null>(null);
+  const [assignmentFilesCursor, setAssignmentFilesCursor] = useState<string | null>(null);
+  const [loadingMoreFiles, setLoadingMoreFiles] = useState(false);
+  const [loadingMoreSubmissions, setLoadingMoreSubmissions] = useState(false);
+  const [submissionFilters, setSubmissionFilters] = useState<SubmissionFilters>(defaultSubmissionFilters);
+  const [draftSubmissionFilters, setDraftSubmissionFilters] = useState<SubmissionFilters>(defaultSubmissionFilters);
   const [selectedSubmission, setSelectedSubmission] = useState<Submission | null>(null);
   const [gradeForm, setGradeForm] = useState({ grade: '', feedback: '' });
+  const gradeBaseline = useRef('');
+  const editBaseline = useRef('');
+  const rubricBaseline = useRef('');
   const [uploadingFiles, setUploadingFiles] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [editForm, setEditForm] = useState({
@@ -74,25 +91,42 @@ const ProfessorAssignmentDetail: React.FC = () => {
   const [selectedTentativeGrade, setSelectedTentativeGrade] = useState<TentativeGrade | null>(null);
   const [finalizingGrade, setFinalizingGrade] = useState(false);
 
+  const unsavedChanges = (selectedSubmission && JSON.stringify(gradeForm) !== gradeBaseline.current) ||
+    (showEditModal && JSON.stringify(editForm) !== editBaseline.current) ||
+    (showRubricModal && JSON.stringify(rubricForm) !== rubricBaseline.current);
+  useEffect(() => {
+    if (!unsavedChanges) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [unsavedChanges]);
+
+  const confirmClose = (close: () => void, changed: boolean) => {
+    if (!changed || window.confirm('Discard unsaved changes?')) close();
+  };
+  const closeGradeModal = () => confirmClose(() => setSelectedSubmission(null), JSON.stringify(gradeForm) !== gradeBaseline.current);
+  const closeEditModal = () => confirmClose(() => setShowEditModal(false), JSON.stringify(editForm) !== editBaseline.current);
+  const closeRubricModal = () => confirmClose(() => setShowRubricModal(false), JSON.stringify(rubricForm) !== rubricBaseline.current);
+
   useEffect(() => {
     if (assignmentId) {
       loadAssignmentDetails();
       loadSubmissions();
       loadRubric();
     }
+    // These loaders reset all assignment-scoped state when the route parameter changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [assignmentId]);
 
   const loadAssignmentDetails = async () => {
     try {
-      setLoading(true);
-      // Fetch assignment files
-      const filesResponse = await professorAPI.getAssignmentFiles(parseInt(assignmentId!));
-
-      // Get the assignment details from the assignments list
-      const assignmentsResponse = await professorAPI.getAssignments();
-      const assignmentData = assignmentsResponse.data.assignments.find(
-        (a: any) => a.id === parseInt(assignmentId!)
-      );
+      if (!assignment) setLoading(true);
+      const [filesResponse, assignmentResponse] = await Promise.all([
+        professorAPI.getAssignmentFiles(parseInt(assignmentId!)),
+        professorAPI.getAssignment(parseInt(assignmentId!)),
+      ]);
+      const assignmentData = assignmentResponse.data.assignment;
+      setAssignmentFilesCursor(filesResponse.data.page?.nextCursor || null);
 
       if (assignmentData) {
         setAssignment({
@@ -100,25 +134,45 @@ const ProfessorAssignmentDetail: React.FC = () => {
           assignmentFiles: filesResponse.data.files || []
         });
       }
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to load assignment details', 'error');
+    } catch (error: unknown) {
+      showToast(httpErrorMessage(error, 'Failed to load assignment details'), 'error');
     } finally {
       setLoading(false);
     }
   };
 
-  const loadSubmissions = async () => {
+  const loadMoreAssignmentFiles = async () => {
+    if (!assignmentId || !assignmentFilesCursor) return;
     try {
-      const response = await professorAPI.getSubmissions(parseInt(assignmentId!));
-      const subs = response.data.submissions || [];
-      setSubmissions(subs);
+      setLoadingMoreFiles(true);
+      const response = await professorAPI.getAssignmentFiles(parseInt(assignmentId), { cursor: assignmentFilesCursor });
+      const files = response.data.items || response.data.files || [];
+      setAssignment(previous => previous ? { ...previous, assignmentFiles: [
+        ...previous.assignmentFiles,
+        ...files.filter((file: { id: number }) => !previous.assignmentFiles.some(existing => existing.id === file.id)),
+      ] } : previous);
+      setAssignmentFilesCursor(response.data.page?.nextCursor || null);
+    } catch {
+      showToast('Could not load more assignment files. Please try again.', 'error');
+    } finally {
+      setLoadingMoreFiles(false);
+    }
+  };
 
-      // Load tentative grades for all submissions
-      subs.forEach((sub: Submission) => {
-        loadTentativeGrade(sub.id);
-      });
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to load submissions', 'error');
+  const loadSubmissions = async (cursor?: string, filters = submissionFilters) => {
+    try {
+      if (cursor) setLoadingMoreSubmissions(true);
+      const response = await professorAPI.getSubmissions(parseInt(assignmentId!), { cursor, ...filters });
+      const subs: Submission[] = response.data.items || response.data.submissions || [];
+      setSubmissions(previous => cursor ? [...previous, ...subs.filter(sub => !previous.some(item => item.id === sub.id))] : subs);
+      setSubmissionsCursor(response.data.page?.nextCursor || null);
+      const newGrades: Record<number, TentativeGrade> = {};
+      for (const sub of subs) if (sub.tentative_grade) newGrades[sub.id] = sub.tentative_grade;
+      setTentativeGrades(previous => cursor ? { ...previous, ...newGrades } : newGrades);
+    } catch (error: unknown) {
+      showToast(httpErrorMessage(error, 'Failed to load submissions'), 'error');
+    } finally {
+      setLoadingMoreSubmissions(false);
     }
   };
 
@@ -126,9 +180,8 @@ const ProfessorAssignmentDetail: React.FC = () => {
     try {
       const response = await gradingAssistantAPI.getRubric(parseInt(assignmentId!));
       setRubric(response.data.rubric);
-    } catch (error: any) {
-      // Rubric might not exist yet, which is okay
-      console.log('No rubric found:', error.response?.data?.error);
+    } catch {
+      // Rubric might not exist yet, which is okay.
     }
   };
 
@@ -139,7 +192,7 @@ const ProfessorAssignmentDetail: React.FC = () => {
       if (response.data.tentativeGrade) {
         setTentativeGrades(prev => ({ ...prev, [submissionId]: response.data.tentativeGrade }));
       }
-    } catch (error: any) {
+    } catch {
       // Tentative grade might not exist yet
       console.log(`No tentative grade for submission ${submissionId}`);
     } finally {
@@ -153,8 +206,8 @@ const ProfessorAssignmentDetail: React.FC = () => {
       await gradingAssistantAPI.generateTentativeGrade(submissionId);
       showToast('Tentative grade generated successfully', 'success');
       loadTentativeGrade(submissionId);
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to generate tentative grade', 'error');
+    } catch (error: unknown) {
+      showToast(httpErrorMessage(error, 'Failed to generate tentative grade'), 'error');
       setLoadingTentativeGrade(prev => ({ ...prev, [submissionId]: false }));
     }
   };
@@ -176,8 +229,8 @@ const ProfessorAssignmentDetail: React.FC = () => {
       showToast(`${files.length} file(s) uploaded successfully`, 'success');
       loadAssignmentDetails();
       e.target.value = '';
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to upload files', 'error');
+    } catch (error: unknown) {
+      showToast(httpErrorMessage(error, 'Failed to upload files'), 'error');
       e.target.value = '';
     } finally {
       setUploadingFiles(false);
@@ -190,8 +243,8 @@ const ProfessorAssignmentDetail: React.FC = () => {
       await professorAPI.deleteAssignmentFile(parseInt(assignmentId!), fileId);
       showToast('File deleted successfully', 'success');
       loadAssignmentDetails();
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to delete file', 'error');
+    } catch (error: unknown) {
+      showToast(httpErrorMessage(error, 'Failed to delete file'), 'error');
     }
   };
 
@@ -214,8 +267,8 @@ const ProfessorAssignmentDetail: React.FC = () => {
       setSelectedSubmission(null);
       setGradeForm({ grade: '', feedback: '' });
       loadSubmissions();
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to grade submission', 'error');
+    } catch (error: unknown) {
+      showToast(httpErrorMessage(error, 'Failed to grade submission'), 'error');
     }
   };
 
@@ -223,8 +276,8 @@ const ProfessorAssignmentDetail: React.FC = () => {
     try {
       const response = await professorAPI.downloadSubmissionFile(fileId);
       window.open(response.data.url, '_blank');
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to download file', 'error');
+    } catch (error: unknown) {
+      showToast(httpErrorMessage(error, 'Failed to download file'), 'error');
     }
   };
 
@@ -236,10 +289,12 @@ const ProfessorAssignmentDetail: React.FC = () => {
 
   const openGradeModal = (submission: Submission) => {
     setSelectedSubmission(submission);
-    setGradeForm({
+    const initial = {
       grade: submission.grade?.toString() || '',
       feedback: submission.feedback || '',
-    });
+    };
+    gradeBaseline.current = JSON.stringify(initial);
+    setGradeForm(initial);
   };
 
   const openEditModal = () => {
@@ -252,13 +307,15 @@ const ProfessorAssignmentDetail: React.FC = () => {
       formattedDate = date.toISOString().slice(0, 16);
     }
 
-    setEditForm({
+    const initial = {
       title: assignment.title,
       description: assignment.description || '',
       questionText: assignment.question_text || '',
       dueDate: formattedDate,
       points: assignment.points
-    });
+    };
+    editBaseline.current = JSON.stringify(initial);
+    setEditForm(initial);
     setShowEditModal(true);
   };
 
@@ -277,15 +334,15 @@ const ProfessorAssignmentDetail: React.FC = () => {
       showToast('Assignment updated successfully', 'success');
       setShowEditModal(false);
       loadAssignmentDetails();
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to update assignment', 'error');
+    } catch (error: unknown) {
+      showToast(httpErrorMessage(error, 'Failed to update assignment'), 'error');
     }
   };
 
   const openRubricModal = () => {
     if (rubric) {
       // Edit existing rubric
-      setRubricForm({
+      const initial = {
         rubricName: rubric.rubric_name,
         criteria: rubric.criteria.map(c => ({
           name: c.name,
@@ -296,13 +353,17 @@ const ProfessorAssignmentDetail: React.FC = () => {
           fair_description: c.fair_description || '',
           poor_description: c.poor_description || ''
         }))
-      });
+      };
+      rubricBaseline.current = JSON.stringify(initial);
+      setRubricForm(initial);
     } else {
       // Create new rubric
-      setRubricForm({
+      const initial = {
         rubricName: '',
         criteria: [{ name: '', description: '', points: 0, excellent_description: '', good_description: '', fair_description: '', poor_description: '' }]
-      });
+      };
+      rubricBaseline.current = JSON.stringify(initial);
+      setRubricForm(initial);
     }
     setShowRubricModal(true);
   };
@@ -321,7 +382,7 @@ const ProfessorAssignmentDetail: React.FC = () => {
     });
   };
 
-  const handleCriterionChange = (index: number, field: string, value: any) => {
+  const handleCriterionChange = (index: number, field: string, value: string | number) => {
     const newCriteria = [...rubricForm.criteria];
     newCriteria[index] = { ...newCriteria[index], [field]: value };
     setRubricForm({ ...rubricForm, criteria: newCriteria });
@@ -362,8 +423,8 @@ const ProfessorAssignmentDetail: React.FC = () => {
       showToast('Rubric created successfully', 'success');
       setShowRubricModal(false);
       loadRubric();
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to create rubric', 'error');
+    } catch (error: unknown) {
+      showToast(httpErrorMessage(error, 'Failed to create rubric'), 'error');
     }
   };
 
@@ -394,14 +455,14 @@ const ProfessorAssignmentDetail: React.FC = () => {
       setSelectedTentativeGrade(null);
       setGradeForm({ grade: '', feedback: '' });
       loadSubmissions();
-    } catch (error: any) {
-      showToast(error.response?.data?.error || 'Failed to finalize grade', 'error');
+    } catch (error: unknown) {
+      showToast(httpErrorMessage(error, 'Failed to finalize grade'), 'error');
     } finally {
       setFinalizingGrade(false);
     }
   };
 
-  if (loading) {
+  if (loading && !assignment) {
     return <div className="loading">Loading assignment details...</div>;
   }
 
@@ -414,20 +475,10 @@ const ProfessorAssignmentDetail: React.FC = () => {
 
   return (
     <div className="professor-assignment-detail-page">
-      <header className="page-header">
-        <div className="header-content">
-          <div className="breadcrumb">
-            <Link to="/dashboard">Back to Dashboard</Link>
-          </div>
-          <div className="header-actions">
-            <span className="user-info">Welcome, {user?.fullName}</span>
-            <button onClick={logout} className="logout-button">Logout</button>
-          </div>
-        </div>
-      </header>
-
-      <main className="page-main">
+      <section className="page-main">
         <div className="assignment-detail-container">
+          <div className="breadcrumb"><Link to="/dashboard?view=assignments">Back to assignments</Link></div>
+          {loading && <span role="status">Refreshing assignment...</span>}
           {/* Assignment Information Section */}
           <div className="assignment-info-section">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
@@ -516,6 +567,9 @@ const ProfessorAssignmentDetail: React.FC = () => {
                       </button>
                     </div>
                   ))}
+                  {assignmentFilesCursor && <button type="button" className="btn-secondary" onClick={() => void loadMoreAssignmentFiles()} disabled={loadingMoreFiles}>
+                    {loadingMoreFiles ? 'Loading files…' : 'Load more files'}
+                  </button>}
                 </div>
               ) : (
                 <p className="empty-message">No files attached to this assignment</p>
@@ -526,6 +580,28 @@ const ProfessorAssignmentDetail: React.FC = () => {
           {/* Submissions Section */}
           <div className="submissions-section">
             <h2>Student Submissions</h2>
+            <form className="submission-filters" onSubmit={event => {
+              event.preventDefault();
+              const next = { ...draftSubmissionFilters, student: draftSubmissionFilters.student.trim() };
+              setSubmissionFilters(next);
+              void loadSubmissions(undefined, next);
+            }}>
+              <label>Grade state
+                <select value={draftSubmissionFilters.gradeState} onChange={event => setDraftSubmissionFilters(previous => ({ ...previous, gradeState: event.target.value as SubmissionFilters['gradeState'] }))}>
+                  <option value="all">All submissions</option><option value="ungraded">Needs grading</option><option value="graded">Graded</option>
+                </select>
+              </label>
+              <label>Student name
+                <input type="search" maxLength={100} value={draftSubmissionFilters.student} onChange={event => setDraftSubmissionFilters(previous => ({ ...previous, student: event.target.value }))} placeholder="Search students" />
+              </label>
+              <label>Sort
+                <select value={draftSubmissionFilters.sort} onChange={event => setDraftSubmissionFilters(previous => ({ ...previous, sort: event.target.value as SubmissionFilters['sort'] }))}>
+                  <option value="submitted_desc">Newest first</option><option value="submitted_asc">Oldest first</option>
+                  <option value="student_asc">Student A–Z</option><option value="student_desc">Student Z–A</option>
+                </select>
+              </label>
+              <button type="submit" className="btn-secondary">Apply filters</button>
+            </form>
 
             {submissions.length === 0 ? (
               <p className="empty-message">No submissions yet</p>
@@ -632,17 +708,19 @@ const ProfessorAssignmentDetail: React.FC = () => {
                     </div>
                   </div>
                 ))}
+                {submissionsCursor && <button type="button" className="btn-secondary" onClick={() => void loadSubmissions(submissionsCursor)} disabled={loadingMoreSubmissions}>
+                  {loadingMoreSubmissions ? 'Loading submissions…' : 'Load more submissions'}
+                </button>}
               </div>
             )}
           </div>
         </div>
-      </main>
+      </section>
 
       {/* Grading Modal */}
       {selectedSubmission && (
-        <div className="modal-overlay" onClick={() => setSelectedSubmission(null)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <h3>Grade Submission - {selectedSubmission.student_name}</h3>
+        <Dialog open onClose={closeGradeModal} title={`Grade Submission - ${selectedSubmission.student_name}`}>
+          <div className="modal-content">
             <form onSubmit={handleGradeSubmission}>
               <div className="form-group">
                 <label htmlFor="grade-input">Grade (out of {assignment.points})</label>
@@ -670,7 +748,7 @@ const ProfessorAssignmentDetail: React.FC = () => {
               <div className="modal-actions">
                 <button
                   type="button"
-                  onClick={() => setSelectedSubmission(null)}
+                  onClick={closeGradeModal}
                   className="btn-secondary"
                 >
                   Cancel
@@ -681,14 +759,13 @@ const ProfessorAssignmentDetail: React.FC = () => {
               </div>
             </form>
           </div>
-        </div>
+        </Dialog>
       )}
 
       {/* Edit Assignment Modal */}
       {showEditModal && (
-        <div className="modal-overlay" onClick={() => setShowEditModal(false)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <h3>Edit Assignment</h3>
+        <Dialog open onClose={closeEditModal} title="Edit Assignment">
+          <div className="modal-content">
             <form onSubmit={handleEditAssignment}>
               <div className="form-group">
                 <label htmlFor="edit-title">Title</label>
@@ -746,7 +823,7 @@ const ProfessorAssignmentDetail: React.FC = () => {
               <div className="modal-actions">
                 <button
                   type="button"
-                  onClick={() => setShowEditModal(false)}
+                  onClick={closeEditModal}
                   className="btn-secondary"
                 >
                   Cancel
@@ -757,14 +834,13 @@ const ProfessorAssignmentDetail: React.FC = () => {
               </div>
             </form>
           </div>
-        </div>
+        </Dialog>
       )}
 
       {/* Rubric Creation Modal */}
       {showRubricModal && (
-        <div className="modal-overlay" onClick={() => setShowRubricModal(false)}>
-          <div className="modal-content rubric-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '800px', maxHeight: '90vh', overflowY: 'auto' }}>
-            <h3>{rubric ? 'View/Edit Rubric' : 'Create Grading Rubric'}</h3>
+        <Dialog open onClose={closeRubricModal} title={rubric ? 'View/Edit Rubric' : 'Create Grading Rubric'}>
+          <div className="modal-content rubric-modal" style={{ maxWidth: '800px', maxHeight: '90vh', overflowY: 'auto' }}>
             <form onSubmit={handleCreateRubric}>
               <div className="form-group">
                 <label htmlFor="rubric-name">Rubric Name *</label>
@@ -898,7 +974,7 @@ const ProfessorAssignmentDetail: React.FC = () => {
               <div className="modal-actions" style={{ marginTop: '20px' }}>
                 <button
                   type="button"
-                  onClick={() => setShowRubricModal(false)}
+                  onClick={closeRubricModal}
                   className="btn-secondary"
                 >
                   Cancel
@@ -909,14 +985,13 @@ const ProfessorAssignmentDetail: React.FC = () => {
               </div>
             </form>
           </div>
-        </div>
+        </Dialog>
       )}
 
       {/* Tentative Grade Details Modal */}
       {showTentativeGradeModal && selectedTentativeGrade && (
-        <div className="modal-overlay" onClick={() => setShowTentativeGradeModal(false)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '700px', maxHeight: '90vh', overflowY: 'auto' }}>
-            <h3>AI-Generated Preliminary Grade</h3>
+        <Dialog open onClose={() => setShowTentativeGradeModal(false)} title="AI-Generated Preliminary Grade">
+          <div className="modal-content" style={{ maxWidth: '700px', maxHeight: '90vh', overflowY: 'auto' }}>
 
             <div className="tentative-grade-details">
               <div className="grade-summary" style={{ textAlign: 'center', padding: '20px', background: '#f0f9ff', borderRadius: '8px', marginBottom: '20px' }}>
@@ -1042,7 +1117,7 @@ const ProfessorAssignmentDetail: React.FC = () => {
               )}
             </div>
           </div>
-        </div>
+        </Dialog>
       )}
     </div>
   );

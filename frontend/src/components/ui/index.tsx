@@ -118,7 +118,7 @@ export function Drawer({ open, onClose, title, children }: { open: boolean; onCl
   const id = useId();
   const panelRef = useOverlay(open, onClose);
   if (!open) return null;
-  return createPortal(<div className="ui-overlay ui-overlay--drawer" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><div ref={panelRef} role="dialog" aria-modal="true" aria-labelledby={`${id}-title`} tabIndex={-1} className="ui-drawer"><div className="ui-overlay__heading"><h2 id={`${id}-title`}>{title}</h2><IconButton variant="ghost" label="Close navigation" icon="×" onClick={onClose} /></div>{children}</div></div>, document.body);
+  return createPortal(<div className="ui-overlay ui-overlay--drawer" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><div ref={panelRef} role="dialog" aria-modal="true" aria-labelledby={`${id}-title`} tabIndex={-1} className="ui-drawer"><div className="ui-overlay__heading"><h2 id={`${id}-title`}>{title}</h2><IconButton variant="ghost" label="Close panel" icon="×" onClick={onClose} /></div>{children}</div></div>, document.body);
 }
 
 export function Skeleton({ label = 'Loading', lines = 3 }: { label?: string; lines?: number }) {
