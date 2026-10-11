@@ -1,14 +1,17 @@
 :root {
   color-scheme: light;
-  --ui-canvas: #f7f4f0;
-  --ui-surface: #fff;
-  --ui-surface-muted: #f2eeea;
+  --ui-canvas: #f8f4ec;
+  --ui-surface: #fffdf8;
+  --ui-surface-muted: #eee8dc;
   --ui-text: #242021;
   --ui-text-muted: #595253;
   --ui-text-subtle: #6c6263;
   --ui-border: #bdb4b2;
   --ui-border-soft: #ded7d4;
   --ui-primary: #861f41;
+  --ui-accent: #e87722;
+  --ui-accent-text: #a83c00;
+  --ui-font-heading: Georgia, "Times New Roman", serif;
   --ui-primary-hover: #6d1935;
   --ui-primary-active: #541328;
   --ui-danger: #9a2637;

@@ -25,3 +25,38 @@
 .work-dashboard__course-grid p { margin: .35rem 0 .75rem; }
 @media (max-width: 850px) { .work-dashboard__metrics, .work-dashboard__course-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 650px) { .work-dashboard__hero { align-items: stretch; flex-direction: column; } .work-dashboard__action { align-self: start; white-space: normal; } .work-dashboard__metrics, .work-dashboard__grid, .work-dashboard__course-grid { grid-template-columns: 1fr; } }
+
+
+.work-dashboard { gap: 2.25rem; }
+.work-dashboard__hero { padding: .5rem 0 1.5rem; border-radius: 0; border-bottom: 1px solid var(--ui-border); background: transparent; color: var(--ui-text); align-items: flex-end; }
+.work-dashboard__hero h2 { max-width: 24ch; margin: 0 0 .75rem; font-family: var(--ui-font-heading); font-size: clamp(1.8rem, 3.1vw, 2.8rem); font-weight: 500; line-height: 1.12; letter-spacing: -.025em; color: var(--ui-primary-active); }
+.work-dashboard__hero p { max-width: 60ch; color: var(--ui-text-muted); }
+.work-dashboard__action { background: var(--ui-primary); color: #fffdf8; border: 1px solid var(--ui-primary); border-radius: .25rem; white-space: normal; max-width: 22rem; text-align: center; }
+.work-dashboard__action:hover { background: var(--ui-primary-hover); color: #fffdf8; }
+.work-dashboard__metrics { gap: 0; border-block: 1px solid var(--ui-border); background: var(--ui-surface-muted); }
+.work-dashboard__metrics .ui-card { border: 0; border-radius: 0; background: transparent; padding: 1.5rem; }
+.work-dashboard__metrics .ui-card + .ui-card { border-left: 1px solid var(--ui-border); }
+.work-dashboard__metrics strong { font-size: 2.5rem; font-family: var(--ui-font-heading); font-weight: 500; font-variant-numeric: tabular-nums; }
+.work-dashboard__grid { grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 2rem; }
+.work-dashboard__grid > .ui-card { padding: 0; border: 0; border-radius: 0; background: transparent; }
+.work-dashboard__section-heading { padding-bottom: .85rem; margin-bottom: 1rem; border-bottom: 1px solid var(--ui-border); align-items: baseline; flex-wrap: wrap; }
+.work-dashboard__section-heading h2 { color: var(--ui-primary-active); font-family: var(--ui-font-heading); font-size: 1.5rem; font-weight: 500; }
+.work-dashboard__list li { padding-block: .4rem 1rem; gap: .4rem; }
+.work-dashboard__list a { text-decoration-thickness: 1px; text-underline-offset: .2em; }
+.work-dashboard__muted { line-height: 1.7; }
+.work-dashboard__course-grid { gap: 1rem; }
+.work-dashboard__course-grid > .ui-card { border-radius: .75rem; box-shadow: none; padding: 1.5rem; }
+.work-dashboard__course-grid h3 { font-family: var(--ui-font-heading); font-size: 1.45rem; color: var(--ui-primary-active); }
+@media (max-width: 850px) { .work-dashboard__metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); } .work-dashboard__metrics .ui-card { padding: 1rem; } }
+@media (max-width: 650px) { .work-dashboard { gap: 1.5rem; } .work-dashboard__grid { grid-template-columns: 1fr; } .work-dashboard__metrics { grid-template-columns: 1fr; } .work-dashboard__metrics .ui-card + .ui-card { border-left: 0; border-top: 1px solid var(--ui-border); } .work-dashboard__metrics .ui-card { grid-template-columns: auto 1fr; align-items: center; column-gap: 1rem; } .work-dashboard__metrics button { grid-column: 2; } }
+
+.app-shell__main :is(.student-dashboard, .professor-dashboard, .root-dashboard) { background: var(--ui-canvas); min-height: auto; }
+.app-shell__main .dashboard-header { background: transparent; padding: 0 0 1.5rem; border-bottom: 1px solid var(--ui-border); }
+.app-shell__main .dashboard-header h1 { color: var(--ui-primary-active); font-family: var(--ui-font-heading); font-size: clamp(2rem, 3.4vw, 3.2rem); font-weight: 500; }
+.app-shell__main .dashboard-header p { color: var(--ui-text-muted); }
+.app-shell__main .dashboard-header .course-title { color: var(--ui-primary) !important; }
+.app-shell__main .dashboard-content { background: var(--ui-canvas); padding-inline: 0; }
+.app-shell__main .dashboard-tabs { background: transparent; margin-block: 1rem; border-bottom: 1px solid var(--ui-border); }
+.app-shell__main .tab-button { border-radius: 0; }
+.app-shell__main .tab-button.active { border-bottom-color: var(--ui-accent-text); color: var(--ui-primary); }
+.app-shell__main .course-card { box-shadow: none; background: var(--ui-surface); }

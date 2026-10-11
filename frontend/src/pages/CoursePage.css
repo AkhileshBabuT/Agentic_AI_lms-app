@@ -641,3 +641,7 @@
   font-weight: 500;
   font-size: 0.9rem;
 }
+
+
+.course-page .course-header { background: var(--ui-surface); box-shadow: none; border-bottom: 1px solid var(--ui-border); padding-block: 2rem; }
+.course-page .header-title h1 { font-family: var(--ui-font-heading); color: var(--ui-primary-active); font-size: clamp(1.8rem, 3vw, 2.6rem); font-weight: 500; }

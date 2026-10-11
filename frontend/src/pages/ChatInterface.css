@@ -764,3 +764,21 @@
     width: 100%;
   }
 }
+
+
+.chat-interface { background: var(--ui-canvas); }
+.chat-interface .chat-header { background: var(--ui-surface); border-bottom: 1px solid var(--ui-border); box-shadow: none; }
+.chat-interface .header-info h2 { font-family: var(--ui-font-heading); color: var(--ui-primary-active); font-size: 1.7rem; font-weight: 500; }
+.chat-interface .messages-container { background: var(--ui-canvas); }
+.chat-interface .message-bubble.agent { background: var(--ui-surface); border: 1px solid var(--ui-border-soft); box-shadow: none; color: var(--ui-text); }
+.chat-interface .message-bubble.student { background: var(--ui-primary); color: #fffdf8; }
+.chat-interface .message-content { line-height: 1.75; overflow-wrap: anywhere; }
+.chat-interface .message-avatar { background: var(--ui-surface-muted); color: var(--ui-primary); }
+.chat-interface .input-container { background: var(--ui-surface); border-top: 1px solid var(--ui-border); box-shadow: none; }
+.chat-interface .send-button { background: var(--ui-primary); color: #fffdf8; }
+.chat-interface .send-button:hover:not(:disabled) { background: var(--ui-primary-hover); }
+.chat-interface .suggestion-chip { color: var(--ui-primary); border-color: var(--ui-border); background: var(--ui-surface); }
+.chat-interface .suggestion-chip:hover { background: var(--ui-surface-muted); }
+.chat-interface .date-separator span { background: var(--ui-canvas); color: var(--ui-text-muted); }
+.chat-interface .back-button { background: var(--ui-surface-muted); color: var(--ui-primary); }
+.chat-interface .status-indicator { animation: none; }

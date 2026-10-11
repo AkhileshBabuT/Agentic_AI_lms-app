@@ -148,3 +148,9 @@
     font-size: 1.75rem;
   }
 }
+
+
+.auth-container { background: var(--ui-canvas); padding: clamp(1rem, 5vw, 4rem); }
+.auth-card { background: var(--ui-surface); border-radius: .75rem; border-top: 6px solid var(--ui-primary); box-shadow: 0 20px 60px rgb(84 19 40 / 10%); padding: clamp(1.5rem, 4vw, 3rem); max-width: 440px; }
+.auth-header { text-align: left; padding-bottom: 1.25rem; border-bottom: 1px solid var(--ui-border-soft); }
+.auth-header h1 { font-family: var(--ui-font-heading); color: var(--ui-primary-active); font-weight: 500; font-size: 2.5rem; letter-spacing: -.025em; }

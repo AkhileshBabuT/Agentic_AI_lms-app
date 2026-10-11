@@ -532,3 +532,10 @@
 .submission-filters label { display: grid; gap: 4px; min-width: min(100%, 170px); font-weight: 600; }
 .submission-filters input, .submission-filters select { min-height: 40px; max-width: 100%; padding: 8px; border: 1px solid var(--color-border, #cbd5e1); border-radius: 6px; background: #fff; color: #1e293b; }
 .submission-filters :is(input, select, button):focus-visible { outline: 2px solid #861f41; outline-offset: 2px; }
+
+
+.professor-assignment-detail-page { background: var(--ui-canvas); }
+.professor-assignment-detail-page .page-header { background: var(--ui-surface); border-bottom-color: var(--ui-border); }
+.professor-assignment-detail-page h1 { font-family: var(--ui-font-heading); color: var(--ui-primary-active); font-weight: 500; }
+.professor-assignment-detail-page .breadcrumb a { color: var(--ui-primary); }
+.professor-assignment-detail-page table { font-variant-numeric: tabular-nums; }

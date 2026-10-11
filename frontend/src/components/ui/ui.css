@@ -12,7 +12,7 @@
 .ui-button:disabled { opacity: .58; }
 .ui-button__spinner { width: 1em; height: 1em; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: ui-spin .8s linear infinite; }
 @keyframes ui-spin { to { transform: rotate(360deg); } }
-.ui-card { min-width: 0; padding: var(--ui-space-6); background: var(--ui-surface); border: 1px solid var(--ui-border-soft); border-radius: var(--ui-radius-lg); box-shadow: var(--ui-shadow-sm); }
+.ui-card { min-width: 0; padding: var(--ui-space-6); background: var(--ui-surface); border: 1px solid var(--ui-border-soft); border-radius: var(--ui-radius-lg); }
 .ui-badge { display: inline-flex; align-items: center; gap: var(--ui-space-1); width: fit-content; padding: .2rem .55rem; border: 1px solid currentColor; border-radius: 999px; font-size: var(--ui-text-sm); font-weight: 650; line-height: 1.35; white-space: nowrap; }
 .ui-tone--neutral { color: var(--ui-text-muted); background: var(--ui-surface-muted); }
 .ui-tone--success { color: var(--ui-success); background: var(--ui-success-surface); }

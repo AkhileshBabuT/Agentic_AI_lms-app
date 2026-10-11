@@ -68,3 +68,30 @@ test('professor material polling stops when indexing completes', async ({ page }
   await page.clock.fastForward(60000);
   expect(materialReads).toBe(initialReads + 1);
 });
+
+for (const role of ['student', 'professor', 'root'] as const) {
+  test(`${role} navigation collapses and restores across a full-width workspace`, async ({ page }) => {
+    await page.setViewportSize({ width: 1920, height: 1080 });
+    await stubApi(page, role);
+    await seedSession(page, role);
+    await page.goto('/dashboard');
+    const rail = page.locator('#desktop-navigation');
+    const main = page.locator('#main-content');
+    await expect(rail).toBeVisible();
+    const expandedWidth = await main.evaluate(element => element.getBoundingClientRect().width);
+    await page.getByRole('button', { name: 'Collapse navigation', exact: true }).click();
+    await expect(rail).toBeHidden();
+    await expect(page.getByRole('button', { name: 'Expand navigation', exact: true })).toHaveAttribute('aria-expanded', 'false');
+    const collapsedWidth = await main.evaluate(element => element.getBoundingClientRect().width);
+    expect(collapsedWidth).toBeGreaterThan(expandedWidth);
+    expect(collapsedWidth).toBe(1920);
+    await page.getByRole('button', { name: 'Expand navigation', exact: true }).click();
+    await expect(rail).toBeVisible();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.getByRole('button', { name: 'Collapse navigation', exact: true })).toBeHidden();
+    await page.getByRole('button', { name: 'Open navigation', exact: true }).click();
+    await expect(page.getByRole('dialog')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog')).toBeHidden();
+  });
+}

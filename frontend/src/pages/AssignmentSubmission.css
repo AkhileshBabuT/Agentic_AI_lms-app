@@ -802,3 +802,7 @@
   font-size: 0.95rem;
   line-height: 1.5;
 }
+
+
+.assignment-submission-page { background: var(--ui-canvas); }
+.assignment-submission-page h1 { font-family: var(--ui-font-heading); color: var(--ui-primary-active); font-weight: 500; }

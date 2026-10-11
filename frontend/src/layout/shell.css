@@ -31,3 +31,34 @@
 .app-shell__drawer-account .app-shell__logout { width: fit-content; background: var(--ui-primary); }
 @media (max-width: 800px) { .app-shell__body { display: block; } .app-shell__sidebar { display: none; } .app-shell__menu-button { display: inline-flex !important; } .app-shell__main { padding: var(--ui-space-5); } }
 @media (max-width: 560px) { .app-shell__topbar-inner { padding-inline: var(--ui-space-3); } .app-shell__brand { font-size: .9rem; } .app-shell__account-name, .app-shell__account-role, .app-shell__account .app-shell__logout { display: none; } .app-page-header__row { flex-direction: column; } .app-shell__main { padding: var(--ui-space-4); } }
+
+
+.app-shell__topbar { background: var(--ui-surface); color: var(--ui-primary-active); border-bottom: 1px solid var(--ui-border-soft); }
+.app-shell__topbar-inner { min-height: 80px; padding-inline: 2rem; }
+.app-shell__brand, .app-shell__brand:hover { color: var(--ui-primary); font-size: 1.4rem; letter-spacing: -.025em; }
+.app-shell__brand-mark { width: 34px; height: 38px; border: 0; border-bottom: 3px solid var(--ui-accent); border-radius: 0; font-family: var(--ui-font-heading); font-size: 2.4rem; font-style: italic; }
+.app-shell__account-role { color: var(--ui-text-muted); }
+.app-shell__account .app-shell__logout { color: var(--ui-primary); border-color: var(--ui-border); }
+.app-shell__account .app-shell__logout:hover { background: var(--ui-surface-muted); }
+.app-shell__body { grid-template-columns: 15rem minmax(0, 1fr); min-height: calc(100vh - 80px); }
+.app-shell__sidebar { background: var(--ui-primary-active); border-right: 0; padding: 2rem 1.25rem; }
+.app-shell__nav { gap: .5rem; }
+.app-shell__sidebar .app-shell__nav-link { color: #fffdf8; border-radius: 0; padding: .8rem .75rem; font-weight: 500; border-bottom: 1px solid transparent; transition: border-color var(--ui-motion-fast), background var(--ui-motion-fast); }
+.app-shell__sidebar .app-shell__nav-link:hover { background: var(--ui-primary-hover); }
+.app-shell__sidebar .app-shell__nav-link--active { background: var(--ui-primary); box-shadow: none; border-bottom-color: var(--ui-accent); font-weight: 750; }
+.app-shell__sidebar-footer { color: #f8e9ee; padding-top: 1.25rem; border-top: 1px solid #a9637a; }
+.app-shell__main { padding: clamp(1.5rem, 3.5vw, 3.5rem); }
+.app-page-header { padding-bottom: 1.5rem; border-bottom: 1px solid var(--ui-border); }
+.app-page-header h1 { font-family: var(--ui-font-heading); font-size: clamp(2rem, 3vw, 3rem); font-weight: 500; letter-spacing: -.025em; color: var(--ui-primary-active); }
+.app-shell__menu-button { color: var(--ui-primary) !important; }
+@media (max-width: 800px) { .app-shell__body { display: block; } .app-shell__main { padding: 1.5rem; } }
+@media (max-width: 560px) { .app-shell__topbar-inner { min-height: 68px; padding-inline: 1rem; gap: .75rem; } .app-shell__brand { font-size: 1.2rem; } .app-shell__main { padding: 1rem; } }
+
+/* Fill the browser; collapse the rail without hiding the content workspace. */
+.app-shell__topbar-inner, .app-shell__body { width: 100%; max-width: none; }
+.app-shell__desktop-toggle { color: var(--ui-primary); }
+.app-shell--collapsed .app-shell__body { grid-template-columns: minmax(0, 1fr); }
+.app-shell--collapsed .app-shell__sidebar { display: none; }
+.app-shell__main :is(.dashboard-content, .dashboard-main, .dashboard-tabs, .course-main, .page-main, .header-content) { max-width: none; width: 100%; }
+@media (min-width: 801px) { .app-shell__menu-button { display: none !important; } }
+@media (max-width: 800px) { .app-shell__desktop-toggle { display: none !important; } }

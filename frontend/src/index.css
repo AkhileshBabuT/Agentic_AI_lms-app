@@ -13,3 +13,10 @@ a { color: var(--link-color); }
 a:hover { color: var(--link-hover); }
 :where(a, button, input, select, textarea, [tabindex]):focus-visible { outline: 3px solid var(--ui-primary); outline-offset: 3px; }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+
+::selection { color: #fffdf8; background: var(--ui-primary); }
+input, textarea { caret-color: var(--ui-primary); }
+a { text-underline-offset: .2em; }
+:where(h1, h2, h3) { text-wrap: balance; }
+:where(th, td, time) { font-variant-numeric: tabular-nums; }
+* { scrollbar-width: thin; scrollbar-color: #b8a99a var(--ui-canvas); }
